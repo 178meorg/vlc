@@ -4314,7 +4314,7 @@ input_EsOutNew(input_thread_t *p_input, input_source_t *main_source, float rate,
 
     /* */
     EsOutPropsInit( &p_sys->video, true, p_input, input_type,
-                    ES_OUT_ES_POLICY_AUTO,
+                    ES_OUT_ES_POLICY_EXCLUSIVE,
                     "video-track-id", "video-track", NULL, NULL );
     EsOutPropsInit( &p_sys->audio, true, p_input, input_type,
                     ES_OUT_ES_POLICY_EXCLUSIVE,
