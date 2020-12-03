@@ -304,7 +304,6 @@ input_thread_t * input_Create( vlc_object_t *p_parent, input_item_t *p_item,
 
     if( priv->type != INPUT_TYPE_PLAYBACK )
     {
-        p_input->obj.logger = NULL;
         p_input->obj.no_interact = true;
     }
 
