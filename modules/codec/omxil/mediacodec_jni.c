@@ -30,6 +30,7 @@
 #include <assert.h>
 
 #include <vlc_common.h>
+#include <vlc_strings.h>
 
 #include <OMX_Core.h>
 #include <OMX_Component.h>
@@ -347,6 +348,74 @@ end:
 /*****************************************************************************
  * MediaCodec_GetName
  *****************************************************************************/
+static bool MatchDecoderPattern(const char *pattern, size_t pattern_len,
+                                const char *name, size_t name_len)
+{
+    size_t p = 0, n = 0, star = SIZE_MAX, retry = 0;
+
+    while (n < name_len)
+    {
+        if (p < pattern_len &&
+            (pattern[p] == '?' || vlc_ascii_tolower(pattern[p]) ==
+                                  vlc_ascii_tolower(name[n])))
+        {
+            p++;
+            n++;
+        }
+        else if (p < pattern_len && pattern[p] == '*')
+        {
+            star = p++;
+            retry = n;
+        }
+        else if (star != SIZE_MAX)
+        {
+            p = star + 1;
+            n = ++retry;
+        }
+        else
+            return false;
+    }
+    while (p < pattern_len && pattern[p] == '*')
+        p++;
+    return p == pattern_len;
+}
+
+static bool IgnoreDolbyProfile(vlc_object_t *p_obj, const char *name,
+                               size_t name_len)
+{
+    char *patterns = var_InheritString(p_obj,
+                                       "mediacodec-dv-ignore-profile");
+    if (patterns == NULL)
+        return false;
+
+    bool matched = false;
+    for (char *pattern = patterns; pattern != NULL; )
+    {
+        char *next = strchr(pattern, ',');
+        if (next != NULL)
+            *next++ = '\0';
+
+        while (*pattern == ' ' || *pattern == '\t')
+            pattern++;
+        size_t len = strlen(pattern);
+        while (len > 0 && (pattern[len - 1] == ' ' ||
+                           pattern[len - 1] == '\t'))
+            len--;
+
+        if (len > 0 && MatchDecoderPattern(pattern, len, name, name_len))
+        {
+            msg_Info(p_obj, "[DV] decoder=%.*s matched profile bypass "
+                     "pattern=%.*s", (int) name_len, name, (int) len,
+                     pattern);
+            matched = true;
+            break;
+        }
+        pattern = next;
+    }
+    free(patterns);
+    return matched;
+}
+
 char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
                          int profile, int *p_quirks)
 {
@@ -381,6 +450,7 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
         const char *name_ptr = NULL;
         bool found = false;
         bool b_adaptive = false;
+        bool ignore_profile = false;
 
         info = (*env)->CallStaticObjectMethod(env, jfields.media_codec_list_class,
                                               jfields.get_codec_info_at, i);
@@ -430,10 +500,17 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
             jobject type = (*env)->GetObjectArrayElement(env, types, j);
             if (!jstrcmp(env, type, psz_mime))
             {
+                if (!strcmp(psz_mime, "video/dolby-vision"))
+                {
+                    msg_Dbg(p_obj, "[DV] candidate decoder=%.*s, profiles=%d",
+                            (int) name_len, name_ptr, profile_levels_len);
+                    ignore_profile = IgnoreDolbyProfile(p_obj, name_ptr,
+                                                        name_len);
+                }
                 /* The mime type is matching for this component. We
                    now check if the capabilities of the codec is
                    matching the video format. */
-                if (profile > 0)
+                if (profile > 0 && !ignore_profile)
                 {
                     /* This decoder doesn't expose its profiles and is high
                      * profile capable */
@@ -477,7 +554,11 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
         }
         if (found)
         {
-            msg_Dbg(p_obj, "using %.*s", name_len, name_ptr);
+            if (!strcmp(psz_mime, "video/dolby-vision"))
+                msg_Info(p_obj, "[DV] selected decoder=%.*s",
+                         (int) name_len, name_ptr);
+            else
+                msg_Dbg(p_obj, "using %.*s", name_len, name_ptr);
             psz_name = malloc(name_len + 1);
             if (psz_name)
             {

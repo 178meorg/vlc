@@ -176,6 +176,12 @@ static void RemoveInflightPictures(decoder_t *);
 
 #define MEDIACODEC_TUNNELEDPLAYBACK_TEXT "Use a tunneled surface for playback"
 
+#define MEDIACODEC_DV_IGNORE_PROFILE_TEXT \
+    "Dolby Vision decoders allowed to ignore profile checks"
+#define MEDIACODEC_DV_IGNORE_PROFILE_LONGTEXT \
+    "Comma-separated decoder name patterns. This exception only applies to " \
+    "video/dolby-vision decoders. '*' and '?' wildcards are supported."
+
 #define CFG_PREFIX "mediacodec-"
 
 vlc_module_begin ()
@@ -190,6 +196,10 @@ vlc_module_begin ()
              MEDIACODEC_AUDIO_TEXT, MEDIACODEC_AUDIO_LONGTEXT, true)
     add_bool(CFG_PREFIX "tunneled-playback", false,
              MEDIACODEC_TUNNELEDPLAYBACK_TEXT, NULL, true)
+    add_string(CFG_PREFIX "dv-ignore-profile",
+               "*dolby.decoder.hevc,OMX.realtek.video.dec.dvhe.stn",
+               MEDIACODEC_DV_IGNORE_PROFILE_TEXT,
+               MEDIACODEC_DV_IGNORE_PROFILE_LONGTEXT, true)
     set_callbacks(OpenDecoderNdk, CloseDecoder)
     add_shortcut("mediacodec_ndk")
     add_submodule ()
@@ -546,6 +556,13 @@ static int StartMediaCodec(decoder_t *p_dec)
         if (p_sys->b_adaptive)
             msg_Dbg(p_dec, "mediacodec configured for adaptative playback");
         args.video.b_adaptive_playback = p_sys->b_adaptive;
+
+        if (!strcmp(p_sys->api.psz_mime, "video/dolby-vision"))
+            msg_Info(p_dec, "[DV] configuring decoder=%s, size=%dx%d, "
+                     "color-standard=%d, color-transfer=%d, color-range=%d",
+                     p_sys->api.psz_name, args.video.i_width,
+                     args.video.i_height, args.video.color_standard,
+                     args.video.color_transfer, args.video.color_range);
     }
     else
     {
@@ -583,6 +600,9 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     int i_ret;
     int i_profile = p_dec->fmt_in.i_profile;
     const char *mime = NULL;
+    const bool b_dolby_vision =
+        p_dec->fmt_in.i_original_fourcc == VLC_FOURCC('d', 'v', 'h', 'e') ||
+        p_dec->fmt_in.i_original_fourcc == VLC_FOURCC('d', 'v', 'h', '1');
 
     /* Video or Audio if "mediacodec-audio" bool is true */
     if (p_dec->fmt_in.i_cat != VIDEO_ES && (p_dec->fmt_in.i_cat != AUDIO_ES
@@ -609,7 +629,7 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
                 if (hevc_get_profile_level(&p_dec->fmt_in, &i_hevc_profile, NULL, NULL))
                     i_profile = i_hevc_profile;
             }
-            mime = "video/hevc";
+            mime = b_dolby_vision ? "video/dolby-vision" : "video/hevc";
             break;
         case VLC_CODEC_H264:
             if (i_profile == -1)
@@ -674,6 +694,12 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     p_sys->video.i_mpeg_dar_num = 0;
     p_sys->video.i_mpeg_dar_den = 0;
 
+    if (b_dolby_vision)
+        msg_Info(p_dec, "[DV] input codec=%4.4s, base=hevc, mime=%s, "
+                 "profile=%d, level=%d",
+                 (const char *) &p_dec->fmt_in.i_original_fourcc, mime,
+                 i_profile, p_dec->fmt_in.i_level);
+
     if (pf_init(&p_sys->api) != 0)
     {
         free(p_sys);
@@ -681,6 +707,8 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     }
     if (p_sys->api.configure(&p_sys->api, i_profile) != 0)
     {
+        if (b_dolby_vision)
+            msg_Err(p_dec, "[DV] no suitable decoder found for mime=%s", mime);
         /* If the device can't handle video/wvc1,
          * it can probably handle video/x-ms-wmv */
         if (!strcmp(mime, "video/wvc1") && p_dec->fmt_in.i_codec == VLC_CODEC_VC1)
@@ -813,9 +841,15 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     i_ret = StartMediaCodec(p_dec);
     if (i_ret != VLC_SUCCESS)
     {
+        if (!strcmp(p_sys->api.psz_mime, "video/dolby-vision"))
+            msg_Err(p_dec, "[DV] MediaCodec configure/start failed for %s",
+                    p_sys->api.psz_name);
         msg_Err(p_dec, "StartMediaCodec failed");
         goto bailout;
     }
+    if (!strcmp(p_sys->api.psz_mime, "video/dolby-vision"))
+        msg_Info(p_dec, "[DV] MediaCodec configure/start succeeded for %s",
+                 p_sys->api.psz_name);
 
     if (vlc_clone(&p_sys->out_thread, OutThread, p_dec,
                   VLC_THREAD_PRIORITY_LOW))
