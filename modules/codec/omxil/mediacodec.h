@@ -104,6 +104,9 @@ struct mc_api_out
                 int crop_top;
                 int crop_right;
                 int crop_bottom;
+                enum mc_media_format_color_transfer_t color_transfer;
+                enum mc_media_format_color_range_t color_range;
+                enum mc_media_format_color_standard_t color_standard;
             } video;
             struct
             {

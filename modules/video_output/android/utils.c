@@ -26,6 +26,120 @@
 #include <pthread.h>
 #include <assert.h>
 
+/* Keep these definitions local so VLC can still be built with an older NDK.
+ * They match android_dataspace_t from Android's graphics headers. */
+#define VLC_ADATASPACE_STANDARD_SHIFT       16
+#define VLC_ADATASPACE_TRANSFER_SHIFT       22
+#define VLC_ADATASPACE_RANGE_SHIFT          27
+#define VLC_ADATASPACE_STANDARD_BT709       (1 << VLC_ADATASPACE_STANDARD_SHIFT)
+#define VLC_ADATASPACE_STANDARD_BT601_625   (2 << VLC_ADATASPACE_STANDARD_SHIFT)
+#define VLC_ADATASPACE_STANDARD_BT601_525   (4 << VLC_ADATASPACE_STANDARD_SHIFT)
+#define VLC_ADATASPACE_STANDARD_BT2020      (6 << VLC_ADATASPACE_STANDARD_SHIFT)
+#define VLC_ADATASPACE_TRANSFER_LINEAR      (1 << VLC_ADATASPACE_TRANSFER_SHIFT)
+#define VLC_ADATASPACE_TRANSFER_SRGB        (2 << VLC_ADATASPACE_TRANSFER_SHIFT)
+#define VLC_ADATASPACE_TRANSFER_SMPTE_170M  (3 << VLC_ADATASPACE_TRANSFER_SHIFT)
+#define VLC_ADATASPACE_TRANSFER_ST2084      (7 << VLC_ADATASPACE_TRANSFER_SHIFT)
+#define VLC_ADATASPACE_TRANSFER_HLG         (8 << VLC_ADATASPACE_TRANSFER_SHIFT)
+#define VLC_ADATASPACE_RANGE_FULL           (1 << VLC_ADATASPACE_RANGE_SHIFT)
+#define VLC_ADATASPACE_RANGE_LIMITED        (2 << VLC_ADATASPACE_RANGE_SHIFT)
+
+int
+AndroidWindow_UpdateDataSpace(ANativeWindow *p_window,
+                              const video_format_t *p_fmt)
+{
+    int32_t i_standard = 0;
+    int32_t i_transfer = 0;
+
+    if (!p_window || !p_fmt)
+        return -1;
+
+    switch (p_fmt->primaries)
+    {
+        case COLOR_PRIMARIES_BT601_525:
+            i_standard = VLC_ADATASPACE_STANDARD_BT601_525;
+            break;
+        case COLOR_PRIMARIES_BT601_625:
+            i_standard = VLC_ADATASPACE_STANDARD_BT601_625;
+            break;
+        case COLOR_PRIMARIES_BT709:
+            i_standard = VLC_ADATASPACE_STANDARD_BT709;
+            break;
+        case COLOR_PRIMARIES_BT2020:
+            i_standard = VLC_ADATASPACE_STANDARD_BT2020;
+            break;
+        default:
+            break;
+    }
+
+    if (i_standard == 0)
+    {
+        switch (p_fmt->space)
+        {
+            case COLOR_SPACE_BT601:
+                i_standard = p_fmt->i_visible_height > 525
+                           ? VLC_ADATASPACE_STANDARD_BT601_625
+                           : VLC_ADATASPACE_STANDARD_BT601_525;
+                break;
+            case COLOR_SPACE_BT709:
+                i_standard = VLC_ADATASPACE_STANDARD_BT709;
+                break;
+            case COLOR_SPACE_BT2020:
+                i_standard = VLC_ADATASPACE_STANDARD_BT2020;
+                break;
+            default:
+                break;
+        }
+    }
+
+    switch (p_fmt->transfer)
+    {
+        case TRANSFER_FUNC_LINEAR:
+            i_transfer = VLC_ADATASPACE_TRANSFER_LINEAR;
+            break;
+        case TRANSFER_FUNC_SRGB:
+            i_transfer = VLC_ADATASPACE_TRANSFER_SRGB;
+            break;
+        case TRANSFER_FUNC_BT709:
+        case TRANSFER_FUNC_BT470_BG:
+        case TRANSFER_FUNC_BT470_M:
+        case TRANSFER_FUNC_SMPTE_240:
+            i_transfer = VLC_ADATASPACE_TRANSFER_SMPTE_170M;
+            break;
+        case TRANSFER_FUNC_SMPTE_ST2084:
+            i_transfer = VLC_ADATASPACE_TRANSFER_ST2084;
+            break;
+        case TRANSFER_FUNC_HLG:
+            i_transfer = VLC_ADATASPACE_TRANSFER_HLG;
+            break;
+        default:
+            break;
+    }
+
+    if (i_standard == 0 || i_transfer == 0)
+        return -1;
+
+    const int32_t i_range = p_fmt->b_color_range_full
+                          ? VLC_ADATASPACE_RANGE_FULL
+                          : VLC_ADATASPACE_RANGE_LIMITED;
+    const int32_t i_dataspace = i_standard | i_transfer | i_range;
+
+    void *p_library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (!p_library)
+        return -1;
+
+    int32_t (*pf_set_buffers_dataspace)(ANativeWindow *, int32_t) =
+        dlsym(p_library, "ANativeWindow_setBuffersDataSpace");
+    if (!pf_set_buffers_dataspace)
+    {
+        dlclose(p_library);
+        return -1;
+    }
+
+    const int i_ret = pf_set_buffers_dataspace(p_window, i_dataspace);
+    dlclose(p_library);
+    return i_ret == 0 ? i_dataspace : -1;
+}
+
 typedef ANativeWindow* (*ptr_ANativeWindow_fromSurface)(JNIEnv*, jobject);
 typedef ANativeWindow* (*ptr_ANativeWindow_fromSurfaceTexture)(JNIEnv*, jobject);
 typedef void (*ptr_ANativeWindow_release)(ANativeWindow*);

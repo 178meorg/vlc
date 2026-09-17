@@ -116,6 +116,7 @@ struct decoder_sys_t
             unsigned i_input_width, i_input_height;
             unsigned int i_stride, i_slice_height;
             int i_pixel_format;
+            bool b_dolby_vision;
             struct hxxx_helper hh;
             /* stores the inflight picture for each output buffer or NULL */
             picture_sys_t** pp_inflight_pictures;
@@ -508,47 +509,58 @@ static int StartMediaCodec(decoder_t *p_dec)
         args.video.p_surface = p_sys->video.p_surface;
         args.video.p_jsurface = p_sys->video.p_jsurface;
 
-        if (p_dec->fmt_out.video.b_color_range_full)
-            args.video.color_range = MC_COLOR_RANGE_FULL;
-        else
-            args.video.color_range = MC_COLOR_RANGE_LIMITED;
-
-        switch (p_dec->fmt_out.video.primaries)
+        if (p_sys->video.b_dolby_vision)
         {
-            case COLOR_PRIMARIES_BT601_525:
-                args.video.color_standard = MC_COLOR_STANDARD_BT601_NTSC;
-                break;
-            case COLOR_PRIMARIES_BT601_625:
-                args.video.color_standard = MC_COLOR_STANDARD_BT601_PAL;
-                break;
-            case COLOR_PRIMARIES_BT709:
-                args.video.color_standard = MC_COLOR_STANDARD_BT709;
-                break;
-            case COLOR_PRIMARIES_BT2020:
-                args.video.color_standard = MC_COLOR_STANDARD_BT2020;
-                break;
-            default:
-                args.video.color_standard = MC_COLOR_STANDARD_UNSPECIFIED;
-                break;
+            /* Dolby Vision output is selected by the vendor decoder from RPU
+             * metadata. Forcing the HEVC base layer BT.2020/PQ colorimetry can
+             * make the proprietary output be interpreted as ordinary YUV. */
+            args.video.color_range = MC_COLOR_RANGE_UNSPECIFIED;
+            args.video.color_standard = MC_COLOR_STANDARD_UNSPECIFIED;
+            args.video.color_transfer = MC_COLOR_TRANSFER_UNSPECIFIED;
         }
-
-        switch (p_dec->fmt_out.video.transfer)
+        else
         {
-            case TRANSFER_FUNC_LINEAR:
-                args.video.color_transfer = MC_COLOR_TRANSFER_LINEAR;
-                break;
-            case TRANSFER_FUNC_SMPTE_ST2084:
-                args.video.color_transfer = MC_COLOR_TRANSFER_ST2084;
-                break;
-            case TRANSFER_FUNC_HLG:
-                args.video.color_transfer = MC_COLOR_TRANSFER_HLG;
-                break;
-            case TRANSFER_FUNC_BT709:
-                args.video.color_transfer = MC_COLOR_TRANSFER_SDR_VIDEO;
-                break;
-            default:
-                args.video.color_transfer = MC_COLOR_TRANSFER_UNSPECIFIED;
-                break;
+            args.video.color_range = p_dec->fmt_out.video.b_color_range_full
+                                   ? MC_COLOR_RANGE_FULL
+                                   : MC_COLOR_RANGE_LIMITED;
+
+            switch (p_dec->fmt_out.video.primaries)
+            {
+                case COLOR_PRIMARIES_BT601_525:
+                    args.video.color_standard = MC_COLOR_STANDARD_BT601_NTSC;
+                    break;
+                case COLOR_PRIMARIES_BT601_625:
+                    args.video.color_standard = MC_COLOR_STANDARD_BT601_PAL;
+                    break;
+                case COLOR_PRIMARIES_BT709:
+                    args.video.color_standard = MC_COLOR_STANDARD_BT709;
+                    break;
+                case COLOR_PRIMARIES_BT2020:
+                    args.video.color_standard = MC_COLOR_STANDARD_BT2020;
+                    break;
+                default:
+                    args.video.color_standard = MC_COLOR_STANDARD_UNSPECIFIED;
+                    break;
+            }
+
+            switch (p_dec->fmt_out.video.transfer)
+            {
+                case TRANSFER_FUNC_LINEAR:
+                    args.video.color_transfer = MC_COLOR_TRANSFER_LINEAR;
+                    break;
+                case TRANSFER_FUNC_SMPTE_ST2084:
+                    args.video.color_transfer = MC_COLOR_TRANSFER_ST2084;
+                    break;
+                case TRANSFER_FUNC_HLG:
+                    args.video.color_transfer = MC_COLOR_TRANSFER_HLG;
+                    break;
+                case TRANSFER_FUNC_BT709:
+                    args.video.color_transfer = MC_COLOR_TRANSFER_SDR_VIDEO;
+                    break;
+                default:
+                    args.video.color_transfer = MC_COLOR_TRANSFER_UNSPECIFIED;
+                    break;
+            }
         }
 
         args.video.b_tunneled_playback = args.video.p_surface ?
@@ -693,6 +705,7 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     p_sys->api.psz_mime = mime;
     p_sys->video.i_mpeg_dar_num = 0;
     p_sys->video.i_mpeg_dar_den = 0;
+    p_sys->video.b_dolby_vision = b_dolby_vision;
 
     if (b_dolby_vision)
         msg_Info(p_dec, "[DV] input codec=%4.4s, base=hevc, mime=%s, "
@@ -990,6 +1003,90 @@ static void RemoveInflightPictures(decoder_t *p_dec)
               p_sys->video.pp_inflight_pictures);
 }
 
+static void Video_UpdateColorimetry(decoder_t *p_dec, const mc_api_out *p_out)
+{
+    decoder_sys_t *p_sys = p_dec->p_sys;
+    const int i_standard = p_out->conf.video.color_standard;
+    const int i_transfer = p_out->conf.video.color_transfer;
+    const int i_range = p_out->conf.video.color_range;
+
+    msg_Dbg(p_dec, "codec output colorimetry: standard=%d transfer=%d range=%d",
+            i_standard, i_transfer, i_range);
+
+    if (p_sys->video.b_dolby_vision)
+    {
+        /* Several Dolby decoders expose private intermediate values here.
+         * They do not describe the final image and must not leak into fmt_out. */
+        msg_Dbg(p_dec, "codec output colorimetry: skipping Dolby Vision "
+                "private intermediate values");
+        return;
+    }
+
+    /* Container/elementary-stream signalling is authoritative. MediaCodec
+     * output colorimetry is only a fallback when it was not available. */
+    switch (p_dec->fmt_out.video.primaries == COLOR_PRIMARIES_UNDEF
+          ? i_standard : MC_COLOR_STANDARD_UNSPECIFIED)
+    {
+        case MC_COLOR_STANDARD_BT601_NTSC:
+            p_dec->fmt_out.video.primaries = COLOR_PRIMARIES_BT601_525;
+            break;
+        case MC_COLOR_STANDARD_BT601_PAL:
+            p_dec->fmt_out.video.primaries = COLOR_PRIMARIES_BT601_625;
+            break;
+        case MC_COLOR_STANDARD_BT709:
+            p_dec->fmt_out.video.primaries = COLOR_PRIMARIES_BT709;
+            break;
+        case MC_COLOR_STANDARD_BT2020:
+            p_dec->fmt_out.video.primaries = COLOR_PRIMARIES_BT2020;
+            break;
+        default:
+            break;
+    }
+
+    if (p_dec->fmt_out.video.space == COLOR_SPACE_UNDEF)
+    {
+        switch (i_standard)
+        {
+            case MC_COLOR_STANDARD_BT601_NTSC:
+            case MC_COLOR_STANDARD_BT601_PAL:
+                p_dec->fmt_out.video.space = COLOR_SPACE_BT601;
+                break;
+            case MC_COLOR_STANDARD_BT709:
+                p_dec->fmt_out.video.space = COLOR_SPACE_BT709;
+                break;
+            case MC_COLOR_STANDARD_BT2020:
+                p_dec->fmt_out.video.space = COLOR_SPACE_BT2020;
+                break;
+            default:
+                break;
+        }
+    }
+
+    switch (p_dec->fmt_out.video.transfer == TRANSFER_FUNC_UNDEF
+          ? i_transfer : MC_COLOR_TRANSFER_UNSPECIFIED)
+    {
+        case MC_COLOR_TRANSFER_LINEAR:
+            p_dec->fmt_out.video.transfer = TRANSFER_FUNC_LINEAR;
+            break;
+        case MC_COLOR_TRANSFER_SDR_VIDEO:
+            p_dec->fmt_out.video.transfer = TRANSFER_FUNC_BT709;
+            break;
+        case MC_COLOR_TRANSFER_ST2084:
+            p_dec->fmt_out.video.transfer = TRANSFER_FUNC_SMPTE_ST2084;
+            break;
+        case MC_COLOR_TRANSFER_HLG:
+            p_dec->fmt_out.video.transfer = TRANSFER_FUNC_HLG;
+            break;
+        default:
+            break;
+    }
+
+    if (i_range == MC_COLOR_RANGE_FULL)
+        p_dec->fmt_out.video.b_color_range_full = true;
+    else if (i_range == MC_COLOR_RANGE_LIMITED)
+        p_dec->fmt_out.video.b_color_range_full = false;
+}
+
 static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
                                picture_t **pp_out_pic, block_t **pp_out_block)
 {
@@ -1066,6 +1163,7 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
     } else {
         assert(p_out->type == MC_OUT_TYPE_CONF);
         p_sys->video.i_pixel_format = p_out->conf.video.pixel_format;
+        Video_UpdateColorimetry(p_dec, p_out);
 
         const char *name = "unknown";
         if (!p_sys->api.b_direct_rendering
@@ -1153,6 +1251,19 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
         {
             msg_Err(p_dec, "UpdateVout failed");
             return -1;
+        }
+
+        if (p_sys->api.b_direct_rendering && p_sys->video.p_surface)
+        {
+            int i_dataspace = AndroidWindow_UpdateDataSpace(
+                p_sys->video.p_surface, &p_dec->fmt_out.video);
+            if (i_dataspace >= 0)
+                msg_Dbg(p_dec, "Surface dataspace re-tagged to 0x%08x from "
+                        "codec output (standard=%d transfer=%d range=%d)",
+                        i_dataspace,
+                        p_out->conf.video.color_standard,
+                        p_out->conf.video.color_transfer,
+                        p_out->conf.video.color_range);
         }
 
         p_sys->b_has_format = true;

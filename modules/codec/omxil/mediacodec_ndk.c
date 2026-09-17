@@ -357,9 +357,17 @@ static int Start(mc_api *api, union mc_api_args *p_args)
         syms.AMediaFormat.setInt32(p_sys->p_format, "height", p_args->video.i_height);
         syms.AMediaFormat.setInt32(p_sys->p_format, "rotation-degrees", p_args->video.i_angle);
 
-        syms.AMediaFormat.setInt32(p_sys->p_format, "color-range", p_args->video.color_range);
-        syms.AMediaFormat.setInt32(p_sys->p_format, "color-standard", p_args->video.color_standard);
-        syms.AMediaFormat.setInt32(p_sys->p_format, "color-transfer", p_args->video.color_transfer);
+        /* Do not add unspecified colorimetry to MediaFormat. In particular,
+         * Dolby Vision decoders must be allowed to derive it from the RPU. */
+        if (p_args->video.color_range != MC_COLOR_RANGE_UNSPECIFIED)
+            syms.AMediaFormat.setInt32(p_sys->p_format, "color-range",
+                                       p_args->video.color_range);
+        if (p_args->video.color_standard != MC_COLOR_STANDARD_UNSPECIFIED)
+            syms.AMediaFormat.setInt32(p_sys->p_format, "color-standard",
+                                       p_args->video.color_standard);
+        if (p_args->video.color_transfer != MC_COLOR_TRANSFER_UNSPECIFIED)
+            syms.AMediaFormat.setInt32(p_sys->p_format, "color-transfer",
+                                       p_args->video.color_transfer);
 
         if (p_args->video.p_surface)
         {
@@ -554,6 +562,9 @@ static int GetOutput(mc_api *api, int i_index, mc_api_out *p_out)
             p_out->conf.video.crop_top      = GetFormatInteger(format, "crop-top");
             p_out->conf.video.crop_right    = GetFormatInteger(format, "crop-right");
             p_out->conf.video.crop_bottom   = GetFormatInteger(format, "crop-bottom");
+            p_out->conf.video.color_standard = GetFormatInteger(format, "color-standard");
+            p_out->conf.video.color_transfer = GetFormatInteger(format, "color-transfer");
+            p_out->conf.video.color_range    = GetFormatInteger(format, "color-range");
         }
         else
         {

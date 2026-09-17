@@ -719,9 +719,16 @@ static int Start(mc_api *api, union mc_api_args *p_args)
         if (p_args->video.i_angle != 0)
             SET_INTEGER(jformat, "rotation-degrees", p_args->video.i_angle);
 
-        SET_INTEGER(jformat, "color-range", p_args->video.color_range);
-        SET_INTEGER(jformat, "color-standard", p_args->video.color_standard);
-        SET_INTEGER(jformat, "color-transfer", p_args->video.color_transfer);
+        /* Leaving unspecified colorimetry out of MediaFormat is important for
+         * Dolby Vision. Vendor decoders use the RPU metadata to select their
+         * output and can produce incorrectly tagged buffers when BT.2020/PQ
+         * is forced here. */
+        if (p_args->video.color_range != MC_COLOR_RANGE_UNSPECIFIED)
+            SET_INTEGER(jformat, "color-range", p_args->video.color_range);
+        if (p_args->video.color_standard != MC_COLOR_STANDARD_UNSPECIFIED)
+            SET_INTEGER(jformat, "color-standard", p_args->video.color_standard);
+        if (p_args->video.color_transfer != MC_COLOR_TRANSFER_UNSPECIFIED)
+            SET_INTEGER(jformat, "color-transfer", p_args->video.color_transfer);
 
         if (b_direct_rendering)
         {
@@ -1050,6 +1057,9 @@ static int GetOutput(mc_api *api, int i_index, mc_api_out *p_out)
             p_out->conf.video.crop_top      = GET_INTEGER(format, "crop-top");
             p_out->conf.video.crop_right    = GET_INTEGER(format, "crop-right");
             p_out->conf.video.crop_bottom   = GET_INTEGER(format, "crop-bottom");
+            p_out->conf.video.color_standard = GET_INTEGER(format, "color-standard");
+            p_out->conf.video.color_transfer = GET_INTEGER(format, "color-transfer");
+            p_out->conf.video.color_range    = GET_INTEGER(format, "color-range");
         }
         else
         {

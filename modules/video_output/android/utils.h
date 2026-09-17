@@ -129,6 +129,14 @@ void AWindowHandler_destroy(AWindowHandler *p_awh);
 native_window_api_t *AWindowHandler_getANativeWindowAPI(AWindowHandler *p_awh);
 
 /**
+ * Tag an Android native window with the dataspace described by a VLC video
+ * format. The public API is only available on recent Android versions and is
+ * resolved at runtime, so older devices simply return an error.
+ */
+int AndroidWindow_UpdateDataSpace(ANativeWindow *p_window,
+                                  const video_format_t *p_fmt);
+
+/**
  * Get the Video or the Subtitles Android Surface
  *
  * \return the surface in a jobject, or NULL. It should be released with

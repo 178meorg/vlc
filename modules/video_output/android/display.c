@@ -693,6 +693,11 @@ static int OpenCommon(vout_display_t *vd)
     if (AndroidWindow_Setup(sys, sys->p_window, 0) != 0)
         goto error;
 
+    int i_dataspace = AndroidWindow_UpdateDataSpace(sys->p_window->p_surface,
+                                                    &sys->p_window->fmt);
+    if (i_dataspace >= 0)
+        msg_Dbg(vd, "Surface dataspace set to 0x%08x", i_dataspace);
+
     /* use software rotation if we don't use private anw */
     if (!sys->p_window->b_opaque && !sys->p_window->b_use_priv)
         video_format_TransformTo(&vd->fmt, ORIENT_NORMAL);
