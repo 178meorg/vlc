@@ -46,7 +46,6 @@
 #include <OMX_Component.h>
 #include "omxil_utils.h"
 #include "../../video_output/android/display.h"
-#include "../../video_output/android/utils.h"
 
 #define BLOCK_FLAG_CSD (0x01 << BLOCK_FLAG_PRIVATE_SHIFT)
 
