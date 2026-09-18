@@ -137,6 +137,12 @@ int AndroidWindow_UpdateDataSpace(ANativeWindow *p_window,
                                   const video_format_t *p_fmt);
 
 /**
+ * Clear any dataspace previously forced on an Android native window. This
+ * lets a hardware decoder attach its own per-buffer dataspace metadata.
+ */
+int AndroidWindow_ClearDataSpace(ANativeWindow *p_window);
+
+/**
  * Get the Video or the Subtitles Android Surface
  *
  * \return the surface in a jobject, or NULL. It should be released with

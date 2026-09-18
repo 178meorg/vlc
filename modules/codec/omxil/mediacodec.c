@@ -46,6 +46,7 @@
 #include <OMX_Component.h>
 #include "omxil_utils.h"
 #include "../../video_output/android/display.h"
+#include "../../video_output/android/utils.h"
 
 #define BLOCK_FLAG_CSD (0x01 << BLOCK_FLAG_PRIVATE_SHIFT)
 
@@ -517,6 +518,19 @@ static int StartMediaCodec(decoder_t *p_dec)
             args.video.color_range = MC_COLOR_RANGE_UNSPECIFIED;
             args.video.color_standard = MC_COLOR_STANDARD_UNSPECIFIED;
             args.video.color_transfer = MC_COLOR_TRANSFER_UNSPECIFIED;
+
+            /* The Android vout is created before MediaCodec and may have
+             * tagged the shared Surface from the HEVC base-layer format.
+             * Clear that HDR10-style tag so the Dolby decoder can publish its
+             * own per-buffer dataspace and metadata. */
+            if (args.video.p_surface != NULL)
+            {
+                int i_ret = AndroidWindow_ClearDataSpace(args.video.p_surface);
+                if (i_ret == 0)
+                    msg_Dbg(p_dec, "[DV] cleared forced Surface dataspace");
+                else
+                    msg_Warn(p_dec, "[DV] failed to clear Surface dataspace");
+            }
         }
         else
         {
@@ -1253,7 +1267,8 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
             return -1;
         }
 
-        if (p_sys->api.b_direct_rendering && p_sys->video.p_surface)
+        if (!p_sys->video.b_dolby_vision &&
+            p_sys->api.b_direct_rendering && p_sys->video.p_surface)
         {
             int i_dataspace = AndroidWindow_UpdateDataSpace(
                 p_sys->video.p_surface, &p_dec->fmt_out.video);

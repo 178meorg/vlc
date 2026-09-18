@@ -43,6 +43,37 @@
 #define VLC_ADATASPACE_RANGE_FULL           (1 << VLC_ADATASPACE_RANGE_SHIFT)
 #define VLC_ADATASPACE_RANGE_LIMITED        (2 << VLC_ADATASPACE_RANGE_SHIFT)
 
+static int
+AndroidWindow_SetDataSpace(ANativeWindow *p_window, int32_t i_dataspace)
+{
+    if (!p_window)
+        return -1;
+
+    void *p_library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (!p_library)
+        return -1;
+
+    int32_t (*pf_set_buffers_dataspace)(ANativeWindow *, int32_t) =
+        dlsym(p_library, "ANativeWindow_setBuffersDataSpace");
+    if (!pf_set_buffers_dataspace)
+    {
+        dlclose(p_library);
+        return -1;
+    }
+
+    const int i_ret = pf_set_buffers_dataspace(p_window, i_dataspace);
+    dlclose(p_library);
+    return i_ret;
+}
+
+int
+AndroidWindow_ClearDataSpace(ANativeWindow *p_window)
+{
+    /* ADATASPACE_UNKNOWN is zero. It removes a producer-side override so
+     * MediaCodec can propagate the vendor decoder's Dolby Vision metadata. */
+    return AndroidWindow_SetDataSpace(p_window, 0);
+}
+
 int
 AndroidWindow_UpdateDataSpace(ANativeWindow *p_window,
                               const video_format_t *p_fmt)
@@ -123,20 +154,7 @@ AndroidWindow_UpdateDataSpace(ANativeWindow *p_window,
                           : VLC_ADATASPACE_RANGE_LIMITED;
     const int32_t i_dataspace = i_standard | i_transfer | i_range;
 
-    void *p_library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
-    if (!p_library)
-        return -1;
-
-    int32_t (*pf_set_buffers_dataspace)(ANativeWindow *, int32_t) =
-        dlsym(p_library, "ANativeWindow_setBuffersDataSpace");
-    if (!pf_set_buffers_dataspace)
-    {
-        dlclose(p_library);
-        return -1;
-    }
-
-    const int i_ret = pf_set_buffers_dataspace(p_window, i_dataspace);
-    dlclose(p_library);
+    const int i_ret = AndroidWindow_SetDataSpace(p_window, i_dataspace);
     return i_ret == 0 ? i_dataspace : -1;
 }
 
