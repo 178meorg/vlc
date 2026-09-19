@@ -31,6 +31,7 @@ check_PROGRAMS = \
 	test_src_misc_epg \
 	test_src_misc_keystore \
 	test_modules_packetizer_hxxx \
+	test_modules_codec_mediacodec_profile \
 	test_modules_demux_libmp4 \
 	test_modules_demux_timestamps \
 	test_modules_demux_ts_pes \
@@ -130,6 +131,7 @@ test_src_interface_dialog_SOURCES = src/interface/dialog.c
 test_src_interface_dialog_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_packetizer_hxxx_SOURCES = modules/packetizer/hxxx.c
 test_modules_packetizer_hxxx_LDADD = $(LIBVLCCORE) $(LIBVLC)
+test_modules_codec_mediacodec_profile_SOURCES = modules/codec/mediacodec_profile.c
 test_modules_keystore_SOURCES = modules/keystore/test.c
 test_modules_keystore_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_tls_SOURCES = modules/misc/tls.c

@@ -38,6 +38,7 @@
 #include "../../packetizer/hevc_nal.h"
 
 #include "mediacodec.h"
+#include "mediacodec_profile.h"
 
 char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
                          int profile, int *p_quirks);
@@ -348,70 +349,13 @@ end:
 /*****************************************************************************
  * MediaCodec_GetName
  *****************************************************************************/
-static bool MatchDecoderPattern(const char *pattern, size_t pattern_len,
-                                const char *name, size_t name_len)
+static bool IgnoreDecoderProfile(vlc_object_t *p_obj, const char *option,
+                                 const char *name, size_t name_len,
+                                 bool ignore_case)
 {
-    size_t p = 0, n = 0, star = SIZE_MAX, retry = 0;
-
-    while (n < name_len)
-    {
-        if (p < pattern_len &&
-            (pattern[p] == '?' || vlc_ascii_tolower(pattern[p]) ==
-                                  vlc_ascii_tolower(name[n])))
-        {
-            p++;
-            n++;
-        }
-        else if (p < pattern_len && pattern[p] == '*')
-        {
-            star = p++;
-            retry = n;
-        }
-        else if (star != SIZE_MAX)
-        {
-            p = star + 1;
-            n = ++retry;
-        }
-        else
-            return false;
-    }
-    while (p < pattern_len && pattern[p] == '*')
-        p++;
-    return p == pattern_len;
-}
-
-static bool IgnoreDolbyProfile(vlc_object_t *p_obj, const char *name,
-                               size_t name_len)
-{
-    char *patterns = var_InheritString(p_obj,
-                                       "mediacodec-dv-ignore-profile");
-    if (patterns == NULL)
-        return false;
-
-    bool matched = false;
-    for (char *pattern = patterns; pattern != NULL; )
-    {
-        char *next = strchr(pattern, ',');
-        if (next != NULL)
-            *next++ = '\0';
-
-        while (*pattern == ' ' || *pattern == '\t')
-            pattern++;
-        size_t len = strlen(pattern);
-        while (len > 0 && (pattern[len - 1] == ' ' ||
-                           pattern[len - 1] == '\t'))
-            len--;
-
-        if (len > 0 && MatchDecoderPattern(pattern, len, name, name_len))
-        {
-            msg_Info(p_obj, "[DV] decoder=%.*s matched profile bypass "
-                     "pattern=%.*s", (int) name_len, name, (int) len,
-                     pattern);
-            matched = true;
-            break;
-        }
-        pattern = next;
-    }
+    char *patterns = var_InheritString(p_obj, option);
+    bool matched = MediaCodec_MatchDecoderList(patterns, name, name_len,
+                                               ignore_case);
     free(patterns);
     return matched;
 }
@@ -500,13 +444,26 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, const char *psz_mime,
             jobject type = (*env)->GetObjectArrayElement(env, types, j);
             if (!jstrcmp(env, type, psz_mime))
             {
+                /* Apply before traversing profileLevels: some TV decoders
+                 * expose an empty list despite being able to decode the input.
+                 * MIME matching, blacklists and encoder exclusion still apply.
+                 */
+                ignore_profile = IgnoreDecoderProfile(p_obj,
+                                    "decoder-ignore-profile", name_ptr,
+                                    name_len, false);
                 if (!strcmp(psz_mime, "video/dolby-vision"))
                 {
                     msg_Dbg(p_obj, "[DV] candidate decoder=%.*s, profiles=%d",
                             (int) name_len, name_ptr, profile_levels_len);
-                    ignore_profile = IgnoreDolbyProfile(p_obj, name_ptr,
-                                                        name_len);
+                    ignore_profile |= IgnoreDecoderProfile(p_obj,
+                                        "mediacodec-dv-ignore-profile", name_ptr,
+                                        name_len, true);
                 }
+                if (profile > 0 && ignore_profile)
+                    msg_Info(p_obj, "Ignoring profile check for decoder=%.*s, "
+                             "mime=%s, target=%d, reported profiles=%d",
+                             (int) name_len, name_ptr, psz_mime, profile,
+                             profile_levels_len);
                 /* The mime type is matching for this component. We
                    now check if the capabilities of the codec is
                    matching the video format. */

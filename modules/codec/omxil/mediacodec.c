@@ -177,6 +177,15 @@ static void RemoveInflightPictures(decoder_t *);
 
 #define MEDIACODEC_TUNNELEDPLAYBACK_TEXT "Use a tunneled surface for playback"
 
+#define MEDIACODEC_IGNORE_PROFILE_TEXT \
+    "Android decoders allowed to ignore profile checks"
+#define MEDIACODEC_IGNORE_PROFILE_LONGTEXT \
+    "Comma-separated decoder name patterns for devices reporting incorrect " \
+    "or empty profiles. Matching decoders may be tried even if their reported " \
+    "profiles do not include the input profile. Names are case-sensitive; " \
+    "'*' and '?' wildcards are supported. A single '*' matches all decoders. " \
+    "The MIME type must still match. Empty disables this exception."
+
 #define MEDIACODEC_DV_IGNORE_PROFILE_TEXT \
     "Dolby Vision decoders allowed to ignore profile checks"
 #define MEDIACODEC_DV_IGNORE_PROFILE_LONGTEXT \
@@ -197,6 +206,9 @@ vlc_module_begin ()
              MEDIACODEC_AUDIO_TEXT, MEDIACODEC_AUDIO_LONGTEXT, true)
     add_bool(CFG_PREFIX "tunneled-playback", false,
              MEDIACODEC_TUNNELEDPLAYBACK_TEXT, NULL, true)
+    add_string("decoder-ignore-profile", NULL,
+               MEDIACODEC_IGNORE_PROFILE_TEXT,
+               MEDIACODEC_IGNORE_PROFILE_LONGTEXT, true)
     add_string(CFG_PREFIX "dv-ignore-profile",
                "*dolby.decoder.hevc,OMX.realtek.video.dec.dvhe.stn",
                MEDIACODEC_DV_IGNORE_PROFILE_TEXT,
