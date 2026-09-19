@@ -20,8 +20,8 @@ VPATH := $(TARBALLS)
 # Common download locations
 GNU ?= http://ftpmirror.gnu.org/gnu
 SF := https://downloads.sourceforge.net/project
-VIDEOLAN := http://downloads.videolan.org/pub/videolan
-CONTRIB_VIDEOLAN := http://downloads.videolan.org/pub/contrib
+VIDEOLAN := https://get.videolan.org
+CONTRIB_VIDEOLAN := https://downloads.videolan.org/pub/contrib
 VIDEOLAN_GIT := https://code.videolan.org
 GITHUB := https://github.com
 GNUGPG := https://www.gnupg.org/ftp/gcrypt
@@ -275,7 +275,7 @@ endif
 SVN ?= $(error subversion client (svn) not found!)
 
 ifeq ($(shell curl --version >/dev/null 2>&1 || echo FAIL),)
-download = curl -f -L --retry 3 --output "$@" -- "$(1)"
+download = curl -f -L --connect-timeout 20 --retry 3 --output "$@" -- "$(1)"
 else ifeq ($(shell wget --version >/dev/null 2>&1 || echo FAIL),)
 download = (rm -f $@.tmp && \
 	wget --passive -c -p -O $@.tmp "$(1)" && \

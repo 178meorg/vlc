@@ -1,6 +1,6 @@
 # CDDB
 CDDB_VERSION := 1.3.2
-CDDB_URL := $(SF)/libcddb/libcddb-$(CDDB_VERSION).tar.bz2
+CDDB_URL := $(SF)/libcddb/libcddb/$(CDDB_VERSION)/libcddb-$(CDDB_VERSION).tar.bz2
 
 ifdef BUILD_NETWORK
 ifdef BUILD_DISCS

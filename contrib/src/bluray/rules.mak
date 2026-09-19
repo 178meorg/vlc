@@ -2,6 +2,7 @@
 
 BLURAY_VERSION := 1.4.1
 BLURAY_URL := $(VIDEOLAN)/libbluray/$(BLURAY_VERSION)/libbluray-$(BLURAY_VERSION).tar.xz
+BLURAY_MIRROR := https://ftp.osuosl.org/pub/videolan/libbluray/$(BLURAY_VERSION)/libbluray-$(BLURAY_VERSION).tar.xz
 
 ifdef BUILD_DISCS
 PKGS += bluray
@@ -40,7 +41,7 @@ BLURAY_CONF += -Dfontconfig=disabled
 endif
 
 $(TARBALLS)/libbluray-$(BLURAY_VERSION).tar.xz:
-	$(call download,$(BLURAY_URL))
+	$(call download,$(BLURAY_URL)) || $(call download,$(BLURAY_MIRROR))
 
 .sum-bluray: libbluray-$(BLURAY_VERSION).tar.xz
 
