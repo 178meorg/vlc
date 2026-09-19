@@ -29,6 +29,7 @@
 #include "Ebml_dispatcher.hpp"
 #include "string_dispatcher.hpp"
 #include "util.hpp"
+#include "dolby_vision.hpp"
 
 extern "C" {
 #include "../vobsub.h"
@@ -972,6 +973,39 @@ void matroska_segment_c::ParseTrackEntry( const KaxTrackEntry *m )
             delete p_track;
             return;
         }
+
+#if LIBMATROSKA_VERSION >= 0x010600
+        /* Read mappings after TrackInit: CodecID and the mappings may occur
+         * in either order. Do not reinterpret AVC/AV1 Dolby profiles as HEVC. */
+        if( p_track->fmt.i_cat == VIDEO_ES &&
+            p_track->fmt.i_codec == VLC_CODEC_HEVC )
+        {
+            for( const auto *element : *m )
+            {
+                if( !MKV_IS_ID(element, KaxBlockAdditionMapping) )
+                    continue;
+                const auto &mapping =
+                    *static_cast<const KaxBlockAdditionMapping *>(element);
+                const auto *type = FindChild<const KaxBlockAddIDType>(mapping);
+                const auto *extra = FindChild<const KaxBlockAddIDExtraData>(mapping);
+                mkv::DolbyVisionConfig config;
+                if( !type || !extra || !mkv::ParseDolbyVisionConfig(
+                        static_cast<uint64>(*type), extra->GetBuffer(),
+                        extra->GetSize(), config) )
+                    continue;
+
+                /* Retain the base HEVC codec/profile and hvcC for packetizers
+                 * and software decoders. MediaCodec uses the original FourCC
+                 * to select video/dolby-vision, just as for DV in MP4. */
+                p_track->fmt.i_original_fourcc = VLC_FOURCC('d','v','h','e');
+                msg_Info(&sys.demuxer, "[DV] Matroska track=%u profile=%u "
+                         "level=%u compatibility=%u enhancement-layer=%u",
+                         p_track->i_number, config.profile, config.level,
+                         config.compatibility, config.enhancement_layer);
+                break;
+            }
+        }
+#endif
 
         tracks.insert( std::make_pair( p_track->i_number, std::unique_ptr<mkv_track_t>(p_track) ) ); // TODO: add warning if two tracks have the same key
     }

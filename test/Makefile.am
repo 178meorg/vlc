@@ -34,6 +34,7 @@ check_PROGRAMS = \
 	test_modules_demux_libmp4 \
 	test_modules_demux_timestamps \
 	test_modules_demux_ts_pes \
+	test_modules_demux_mkv_dolby_vision \
 	test_modules_keystore
 
 if ENABLE_SOUT
@@ -141,6 +142,7 @@ test_modules_demux_libmp4_SOURCES = modules/demux/libmp4.c \
 				../modules/demux/mp4/libmp4.c \
 				../modules/demux/mp4/libmp4.h
 test_modules_demux_timestamps_SOURCES = modules/demux/timestamps.c
+test_modules_demux_mkv_dolby_vision_SOURCES = modules/demux/mkv_dolby_vision.cpp
 test_modules_demux_ts_pes_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_demux_ts_pes_SOURCES = modules/demux/ts_pes.c \
 				../modules/demux/mpeg/ts_pes.c \

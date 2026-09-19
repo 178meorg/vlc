@@ -731,7 +731,11 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
         free(p_sys);
         return VLC_EGENERIC;
     }
-    if (p_sys->api.configure(&p_sys->api, i_profile) != 0)
+    /* fmt_in.i_profile describes the HEVC base layer, not an Android Dolby
+     * Vision profile. Until the latter is carried separately, select by the
+     * Dolby MIME only; comparing Main10 to Dolby profileLevels rejects valid
+     * decoders (unless their name happens to match the bypass list). */
+    if (p_sys->api.configure(&p_sys->api, b_dolby_vision ? -1 : i_profile) != 0)
     {
         if (b_dolby_vision)
             msg_Err(p_dec, "[DV] no suitable decoder found for mime=%s", mime);
