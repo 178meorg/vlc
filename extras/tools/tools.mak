@@ -10,7 +10,9 @@ TARBALLS := $(TOOLS)
 #
 
 ifeq ($(shell command -v curl >/dev/null 2>&1 || echo FAIL),)
-download = curl -f -L --connect-timeout 20 --retry 3 --output "$@" -- "$(1)"
+# Retry receive/TLS errors too, and never publish a partially downloaded archive.
+download = (curl -f -L --connect-timeout 20 --retry 3 --retry-all-errors \
+	--output "$@.tmp" -- "$(1)" && mv -f "$@.tmp" "$@")
 else ifeq ($(shell command -v wget >/dev/null 2>&1 || echo FAIL),)
 download = rm -f $@.tmp && \
 	wget --passive -c -p -O $@.tmp "$(1)" && \
