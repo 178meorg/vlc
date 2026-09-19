@@ -1,7 +1,7 @@
 # SoXR
 
 SOXR_VERSION := 0.1.3
-SOXR_URL := $(GITHUB)/chirlu/soxr/archive/refs/tags/$(SOXR_VERSION).tar.gz
+SOXR_URL := $(SF)/soxr/soxr-$(SOXR_VERSION)-Source.tar.xz
 
 ifeq ($(call need_pkg,"soxr >= 0.1"),)
 PKGS_FOUND += soxr

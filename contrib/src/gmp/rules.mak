@@ -1,7 +1,7 @@
 # GNU Multiple Precision Arithmetic
 
 GMP_VERSION := 6.3.0
-GMP_URL := https://gmplib.org/download/gmp/gmp-$(GMP_VERSION).tar.xz
+GMP_URL := $(GNU)/gmp/gmp-$(GMP_VERSION).tar.xz
 
 GMP_CONF :=
 

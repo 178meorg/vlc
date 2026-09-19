@@ -3,6 +3,7 @@
 LIVE555_VERSION := 2026.06.24
 LIVE555_FILE := live.$(LIVE555_VERSION).tar.gz
 LIVEDOTCOM_URL := $(CONTRIB_VIDEOLAN)/live555/$(LIVE555_FILE)
+LIVEDOTCOM_MIRROR := https://sources.openwrt.org/$(LIVE555_FILE)
 
 define CXX20_ATOMIC_FLAG_CHECK
 #include <atomic> \n
@@ -26,7 +27,7 @@ PKGS_FOUND += live555
 endif
 
 $(TARBALLS)/$(LIVE555_FILE):
-	$(call download_pkg,$(LIVEDOTCOM_URL),live555)
+	$(call download,$(LIVEDOTCOM_MIRROR)) || $(call download,$(LIVEDOTCOM_URL))
 
 .sum-live555: $(LIVE555_FILE)
 

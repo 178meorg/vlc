@@ -18,7 +18,7 @@ DATE := $(shell date +%Y%m%d)
 VPATH := $(TARBALLS)
 
 # Common download locations
-GNU ?= http://ftpmirror.gnu.org/gnu
+GNU ?= https://ftp.gnu.org/gnu
 SF := https://downloads.sourceforge.net/project
 VIDEOLAN := https://get.videolan.org
 CONTRIB_VIDEOLAN := https://downloads.videolan.org/pub/contrib
@@ -290,8 +290,9 @@ else
 download = $(error Neither curl nor wget found!)
 endif
 
-download_pkg = $(call download,$(CONTRIB_VIDEOLAN)/$(2)/$(lastword $(subst /, ,$(@)))) || \
-	( $(call download,$(1)) && echo "Please upload this package $(lastword $(subst /, ,$(@))) to our FTP" )
+# Prefer upstream so an unavailable archive mirror does not delay every package.
+download_pkg = $(call download,$(1)) || \
+	$(call download,$(CONTRIB_VIDEOLAN)/$(2)/$(lastword $(subst /, ,$(@))))
 
 ifeq ($(shell which xz >/dev/null 2>&1 || echo FAIL),)
 XZ = xz

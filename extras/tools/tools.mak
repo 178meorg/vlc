@@ -10,7 +10,7 @@ TARBALLS := $(TOOLS)
 #
 
 ifeq ($(shell command -v curl >/dev/null 2>&1 || echo FAIL),)
-download = curl -f -L --retry 3 --output "$@" -- "$(1)"
+download = curl -f -L --connect-timeout 20 --retry 3 --output "$@" -- "$(1)"
 else ifeq ($(shell command -v wget >/dev/null 2>&1 || echo FAIL),)
 download = rm -f $@.tmp && \
 	wget --passive -c -p -O $@.tmp "$(1)" && \
@@ -35,8 +35,9 @@ else
 SHA512SUM = $(error SHA-512 checksumming not found!)
 endif
 
-download_pkg = $(call download,$(VIDEOLAN)/$(2)/$(lastword $(subst /, ,$(@)))) || \
-	( $(call download,$(1)) && echo "Please upload package $(lastword $(subst /, ,$(@))) to our FTP" )  \
+# Check the archive regardless of which source supplied it.
+download_pkg = ( $(call download,$(1)) || \
+	( $(call download,$(VIDEOLAN)/$(2)/$(lastword $(subst /, ,$(@)))) ) ) \
 	&& grep $(@) $(TOOLS)/SHA512SUMS| $(SHA512SUM) /dev/stdin
 
 ifeq ($(V),1)

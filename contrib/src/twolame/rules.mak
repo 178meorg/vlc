@@ -1,7 +1,7 @@
 # twolame
 
 TWOLAME_VERSION := 0.4.0
-TWOLAME_URL := $(SF)/twolame/twolame-$(TWOLAME_VERSION).tar.gz
+TWOLAME_URL := $(SF)/twolame/twolame/$(TWOLAME_VERSION)/twolame-$(TWOLAME_VERSION).tar.gz
 
 ifdef BUILD_ENCODERS
 PKGS += twolame
