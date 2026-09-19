@@ -1,7 +1,7 @@
 # lame
 
 LAME_VERSION := 3.100
-LAME_URL := $(SF)/lame/lame-$(LAME_VERSION).tar.gz
+LAME_URL := $(SF)/lame/lame/$(LAME_VERSION)/lame-$(LAME_VERSION).tar.gz
 
 $(TARBALLS)/lame-$(LAME_VERSION).tar.gz:
 	$(call download_pkg,$(LAME_URL),lame)
