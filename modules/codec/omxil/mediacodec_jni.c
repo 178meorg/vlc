@@ -37,6 +37,7 @@
 #include "omxil_utils.h"
 
 #include "mediacodec.h"
+#include "mediacodec_profile.h"
 #include "../../video_output/android/env.h"
 
 char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
@@ -327,10 +328,15 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
             jobject type = (*env)->GetObjectArrayElement(env, types, j);
             if (!jstrcmp(env, type, psz_mime))
             {
+                char *ignore_names = var_InheritString(p_obj,
+                                                       "decoder-ignore-profile");
+                bool ignore_profile = MediaCodec_MatchDecoderList(
+                    ignore_names, name_ptr, name_len, false);
+                free(ignore_names);
                 /* The mime type is matching for this component. We
                    now check if the capabilities of the codec is
                    matching the video format. */
-                if (profile > 0)
+                if (profile > 0 && !ignore_profile)
                 {
                     /* This decoder doesn't expose its profiles and is high
                      * profile capable */

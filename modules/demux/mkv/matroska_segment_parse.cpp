@@ -29,6 +29,7 @@
 #include "string_dispatcher.hpp"
 #include "util.hpp"
 #include "chapter_command_script.hpp"
+#include "dolby_vision.hpp"
 
 extern "C" {
 #include "../vobsub.h"
@@ -1143,6 +1144,37 @@ void matroska_segment_c::ParseTrackEntry( const KaxTrackEntry *m )
             delete p_track;
             return;
         }
+
+#if LIBMATROSKA_VERSION >= 0x010600
+        if( p_track->fmt.i_cat == VIDEO_ES &&
+            p_track->fmt.i_codec == VLC_CODEC_HEVC )
+        {
+            for( const auto *element : *m )
+            {
+                if( !MKV_IS_ID(element, KaxBlockAdditionMapping) )
+                    continue;
+                const auto &mapping =
+                    *static_cast<const KaxBlockAdditionMapping *>(element);
+                const auto *type = FindChild<const KaxBlockAddIDType>(mapping);
+                const auto *extra = FindChild<const KaxBlockAddIDExtraData>(mapping);
+                mkv::DolbyVisionConfig config;
+                if( !type || !extra || !mkv::ParseDolbyVisionConfig(
+                        static_cast<uint64>(*type), extra->GetBuffer(),
+                        extra->GetSize(), config) )
+                    continue;
+
+                p_track->fmt.i_original_fourcc = VLC_FOURCC('d','v','h','e');
+                p_track->fmt.video.dovi.version_major = 1;
+                p_track->fmt.video.dovi.version_minor = 0;
+                p_track->fmt.video.dovi.profile = config.profile;
+                p_track->fmt.video.dovi.level = config.level;
+                p_track->fmt.video.dovi.rpu_present = true;
+                p_track->fmt.video.dovi.bl_present = true;
+                p_track->fmt.video.dovi.el_present = config.enhancement_layer;
+                break;
+            }
+        }
+#endif
 
         tracks.insert( std::make_pair( p_track->i_number, std::unique_ptr<mkv_track_t>(p_track) ) ); // TODO: add warning if two tracks have the same key
     }

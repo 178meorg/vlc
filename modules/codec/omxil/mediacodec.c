@@ -196,6 +196,9 @@ static void ReleaseAllPictureContexts(decoder_sys_t *);
 #define MEDIACODEC_AUDIO_LONGTEXT "Still experimental."
 
 #define MEDIACODEC_TUNNELEDPLAYBACK_TEXT "Use a tunneled surface for playback"
+#define MEDIACODEC_IGNORE_PROFILE_TEXT "Decoders allowed to ignore profile checks"
+#define MEDIACODEC_IGNORE_PROFILE_LONGTEXT \
+    "Comma-separated decoder name patterns. '*' and '?' wildcards are supported."
 
 #define CFG_PREFIX "mediacodec-"
 
@@ -210,7 +213,10 @@ vlc_module_begin ()
     add_bool(CFG_PREFIX "audio", false,
              MEDIACODEC_AUDIO_TEXT, MEDIACODEC_AUDIO_LONGTEXT)
     add_bool(CFG_PREFIX "tunneled-playback", false,
-             MEDIACODEC_TUNNELEDPLAYBACK_TEXT, NULL)
+              MEDIACODEC_TUNNELEDPLAYBACK_TEXT, NULL)
+    add_string("decoder-ignore-profile", NULL,
+               MEDIACODEC_IGNORE_PROFILE_TEXT,
+               MEDIACODEC_IGNORE_PROFILE_LONGTEXT)
     set_callbacks(OpenDecoderNdk, CloseDecoder)
     add_shortcut("mediacodec_ndk")
     add_submodule ()
@@ -608,9 +614,23 @@ static int StartMediaCodec(decoder_t *p_dec)
 
         args.video.p_surface = p_sys->video.p_surface;
 
-        args.video.color.range = vlc_to_mc_color_range(p_dec->fmt_out.video.color_range);
-        args.video.color.standard = vlc_to_mc_color_standard(p_dec->fmt_out.video.primaries, p_dec->fmt_out.video.space);
-        args.video.color.transfer = vlc_to_mc_color_transfer(p_dec->fmt_out.video.transfer);
+        if (p_dec->fmt_in->i_codec == VLC_CODEC_HEVC &&
+            p_dec->fmt_in->video.dovi.rpu_present &&
+            p_dec->fmt_in->video.dovi.bl_present)
+        {
+            /* The vendor decoder determines final colorspace from the RPU. */
+            args.video.color.range = MC_COLOR_RANGE_UNSPECIFIED;
+            args.video.color.standard = MC_COLOR_STANDARD_UNSPECIFIED;
+            args.video.color.transfer = MC_COLOR_TRANSFER_UNSPECIFIED;
+            if (args.video.p_surface != NULL)
+                AndroidWindow_ClearDataSpace(args.video.p_surface);
+        }
+        else
+        {
+            args.video.color.range = vlc_to_mc_color_range(p_dec->fmt_out.video.color_range);
+            args.video.color.standard = vlc_to_mc_color_standard(p_dec->fmt_out.video.primaries, p_dec->fmt_out.video.space);
+            args.video.color.transfer = vlc_to_mc_color_transfer(p_dec->fmt_out.video.transfer);
+        }
 
 
         args.video.b_tunneled_playback = args.video.p_surface ?
@@ -1156,6 +1176,9 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     int i_ret;
     int i_profile = p_dec->fmt_in->i_profile;
     const char *mime = NULL;
+    const bool b_dolby_vision = p_dec->fmt_in->i_codec == VLC_CODEC_HEVC &&
+        p_dec->fmt_in->video.dovi.rpu_present &&
+        p_dec->fmt_in->video.dovi.bl_present;
 
     /* Video or Audio if "mediacodec-audio" bool is true */
     if (p_dec->fmt_in->i_cat != VIDEO_ES && (p_dec->fmt_in->i_cat != AUDIO_ES
@@ -1182,7 +1205,7 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
                 if (hevc_get_profile_level(p_dec->fmt_in, &i_hevc_profile, NULL, NULL))
                     i_profile = i_hevc_profile;
             }
-            mime = "video/hevc";
+            mime = b_dolby_vision ? "video/dolby-vision" : "video/hevc";
             break;
         case VLC_CODEC_H264:
             if (i_profile == -1)
@@ -1262,7 +1285,8 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
         free(p_sys);
         return VLC_EGENERIC;
     }
-    if (p_sys->api.prepare(&p_sys->api, i_profile) != 0)
+    /* The HEVC base layer profile is not an Android Dolby Vision profile. */
+    if (p_sys->api.prepare(&p_sys->api, b_dolby_vision ? -1 : i_profile) != 0)
     {
         /* If the device can't handle video/wvc1,
          * it can probably handle video/x-ms-wmv */
@@ -1630,19 +1654,23 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
                 p_out->conf.video.crop_right, p_out->conf.video.crop_bottom);
 
         /* Only use MediaCodec output as fallback when container/input is unspecified */
-        if (p_dec->fmt_out.video.primaries == COLOR_PRIMARIES_UNDEF)
+        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+            p_dec->fmt_out.video.primaries == COLOR_PRIMARIES_UNDEF)
             p_dec->fmt_out.video.primaries =
                 mc_to_vlc_primaries(p_out->conf.video.color.standard);
 
-        if (p_dec->fmt_out.video.space == COLOR_SPACE_UNDEF)
+        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+            p_dec->fmt_out.video.space == COLOR_SPACE_UNDEF)
             p_dec->fmt_out.video.space =
                  mc_to_vlc_color_space(p_out->conf.video.color.standard);
 
-        if (p_dec->fmt_out.video.transfer == TRANSFER_FUNC_UNDEF)
+        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+            p_dec->fmt_out.video.transfer == TRANSFER_FUNC_UNDEF)
             p_dec->fmt_out.video.transfer =
                 mc_to_vlc_color_transfer(p_out->conf.video.color.transfer);
 
-        if (p_dec->fmt_out.video.color_range == COLOR_RANGE_UNDEF)
+        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+            p_dec->fmt_out.video.color_range == COLOR_RANGE_UNDEF)
             p_dec->fmt_out.video.color_range =
                 mc_to_vlc_color_range(p_out->conf.video.color.range);
 

@@ -34,6 +34,22 @@
 #include <pthread.h>
 #include <assert.h>
 
+int AndroidWindow_ClearDataSpace(ANativeWindow *window)
+{
+    if (window == NULL)
+        return -1;
+
+    void *library = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (library == NULL)
+        return -1;
+
+    int32_t (*set_dataspace)(ANativeWindow *, int32_t) =
+        dlsym(library, "ANativeWindow_setBuffersDataSpace");
+    int ret = set_dataspace != NULL ? set_dataspace(window, ADATASPACE_UNKNOWN) : -1;
+    dlclose(library);
+    return ret;
+}
+
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>

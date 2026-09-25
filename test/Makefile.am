@@ -79,8 +79,10 @@ check_PROGRAMS = \
 	test_modules_codec_hxxx_helper \
 	test_modules_codec_cea708_aspect_ratio \
 	test_modules_codec_cea708_integration \
+	test_modules_codec_mediacodec_profile \
 	test_modules_keystore \
 	test_modules_demux_libmp4 \
+	test_modules_demux_mkv_dolby_vision \
 	test_modules_demux_timestamps \
 	test_modules_demux_timestamps_filter \
 	test_modules_demux_ts_pes \
@@ -349,6 +351,9 @@ test_modules_packetizer_mpegvideo_SOURCES = modules/packetizer/mpegvideo.c \
 				modules/packetizer/packetizer.h
 test_modules_packetizer_mpegvideo_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_keystore_SOURCES = modules/keystore/test.c
+test_modules_codec_mediacodec_profile_SOURCES = modules/codec/mediacodec_profile.c
+test_modules_codec_mediacodec_profile_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/../include
+test_modules_demux_mkv_dolby_vision_SOURCES = modules/demux/mkv_dolby_vision.cpp
 test_modules_keystore_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_tls_SOURCES = modules/misc/tls.c
 test_modules_tls_LDADD = $(LIBVLCCORE) $(LIBVLC)

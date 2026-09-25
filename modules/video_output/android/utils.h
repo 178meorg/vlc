@@ -46,6 +46,9 @@
 /* AWH backed by a Android SurfaceView */
 #define AWH_CAPS_SURFACE_VIEW 0x2
 
+/* Clear a producer-side dataspace override before starting a Dolby decoder. */
+int AndroidWindow_ClearDataSpace(ANativeWindow *window);
+
 /*
  * AImageReader function pointers
  */

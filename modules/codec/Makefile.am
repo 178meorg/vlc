@@ -495,6 +495,7 @@ libomxil_plugin_la_LDFLAGS = $(AM_LDFLAGS) $(codec_RPATH)
 
 libmediacodec_plugin_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/codec/omxil
 libmediacodec_plugin_la_SOURCES = codec/omxil/mediacodec.c codec/omxil/mediacodec.h \
+	codec/omxil/mediacodec_profile.h \
 	codec/omxil/mediacodec_jni.c codec/omxil/mediacodec_ndk.c codec/omxil/utils.c \
 	codec/omxil/omxil_utils.h codec/omxil/qcom.c codec/omxil/qcom.h
 libmediacodec_plugin_la_LIBADD = libchroma_copy.la libvlc_hxxxhelper.la \

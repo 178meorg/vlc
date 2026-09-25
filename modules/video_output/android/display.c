@@ -673,7 +673,8 @@ static int CreateSurfaceControl(vout_display_t *vd)
 
     /* Set colorspace */
     int32_t dataspace = video_format_to_adataspace(vd->source);
-    if (dataspace != ADATASPACE_UNKNOWN)
+    if (dataspace != ADATASPACE_UNKNOWN &&
+        !(vd->source->dovi.rpu_present && vd->source->dovi.bl_present))
         asc_api->ASurfaceTransaction.setBufferDataSpace(txn, sc, dataspace);
 
     asc_api->ASurfaceTransaction.apply(txn);
