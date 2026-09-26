@@ -38,10 +38,8 @@
 
 #include "mediacodec.h"
 #include "mediacodec_profile.h"
+#include "mediacodec_candidates.h"
 #include "../../video_output/android/env.h"
-
-char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
-                         const char *psz_mime, int profile, int *p_quirks);
 
 #define THREAD_NAME "mediacodec"
 
@@ -104,12 +102,16 @@ static const struct member members[] = {
 static int jstrcmp(JNIEnv* env, jobject str, const char* str2)
 {
     jsize len = (*env)->GetStringUTFLength(env, str);
+    if ((*env)->ExceptionCheck(env))
+        return -2;
     if (len != (jsize) strlen(str2))
         return -1;
     const char *ptr = (*env)->GetStringUTFChars(env, str, NULL);
+    if (ptr == NULL)
+        return -2;
     int ret = memcmp(ptr, str2, len);
     (*env)->ReleaseStringUTFChars(env, str, ptr);
-    return ret;
+    return ret == 0 ? 0 : -1;
 }
 
 static inline bool check_exception(JNIEnv *env)
@@ -217,7 +219,7 @@ static char *GetManufacturer(JNIEnv *env)
     char *manufacturer = NULL;
 
     jclass clazz = (*env)->FindClass(env, "android/os/Build");
-    if (CHECK_EXCEPTION())
+    if (CHECK_EXCEPTION() || clazz == NULL)
         return NULL;
 
     jfieldID id = (*env)->GetStaticFieldID(env, clazz, "MANUFACTURER",
@@ -227,7 +229,7 @@ static char *GetManufacturer(JNIEnv *env)
 
     jstring jstr = (*env)->GetStaticObjectField(env, clazz, id);
 
-    if (CHECK_EXCEPTION())
+    if (CHECK_EXCEPTION() || jstr == NULL)
         goto end;
 
     const char *str = (*env)->GetStringUTFChars(env, jstr, 0);
@@ -236,179 +238,203 @@ static char *GetManufacturer(JNIEnv *env)
         manufacturer = strdup(str);
         (*env)->ReleaseStringUTFChars(env, jstr, str);
     }
+    else
+        CHECK_EXCEPTION();
+    (*env)->DeleteLocalRef(env, jstr);
 
 end:
     (*env)->DeleteLocalRef(env, clazz);
     return manufacturer;
 }
 
-/*****************************************************************************
- * MediaCodec_GetName
- *****************************************************************************/
-char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
-                         const char *psz_mime, int profile, int *p_quirks)
+struct mc_enumeration
 {
+    vlc_object_t *obj;
     JNIEnv *env;
-    int num_codecs;
-    jstring jmime;
-    char *psz_name = NULL;
+    vlc_fourcc_t codec;
+    bool video;
+    const struct mc_score_rule *rules;
+    const char *failed;
+    const char *ignore_names;
+};
 
-    if (!(env = android_getEnv(p_obj, THREAD_NAME)))
-        return NULL;
+static int EnumerateCandidates(void *opaque,
+                               const struct mc_candidate_request *request,
+                               struct mc_candidates *candidates)
+{
+    const struct mc_enumeration *ctx = opaque;
+    vlc_object_t *p_obj = ctx->obj;
+    JNIEnv *env = ctx->env;
+    int ret = VLC_SUCCESS;
+    jstring jmime = JNI_NEW_STRING(request->mime);
+    if (jmime == NULL)
+        return VLC_ENOMEM;
 
-    if (!InitJNIFields(p_obj, env))
-        return NULL;
-
-    jmime = JNI_NEW_STRING(psz_mime);
-    if (!jmime)
-        return NULL;
-
-    num_codecs = (*env)->CallStaticIntMethod(env,
-                                             jfields.media_codec_list_class,
-                                             jfields.get_codec_count);
+    int num_codecs = (*env)->CallStaticIntMethod(env,
+                         jfields.media_codec_list_class, jfields.get_codec_count);
+    if (CHECK_EXCEPTION())
+    {
+        ret = VLC_EGENERIC;
+        goto done;
+    }
 
     for (int i = 0; i < num_codecs; i++)
     {
-        jobject codec_capabilities = NULL;
-        jobject profile_levels = NULL;
-        jobject info = NULL;
-        jobject name = NULL;
-        jobject types = NULL;
-        jsize name_len = 0;
-        int profile_levels_len = 0, num_types = 0;
+        jobject codec_capabilities = NULL, profile_levels = NULL;
+        jobject info = NULL, name = NULL, types = NULL;
         const char *name_ptr = NULL;
-        bool found = false;
-        bool b_adaptive = false;
+        bool found = false, b_adaptive = false;
+        int quirks = 0;
 
         info = (*env)->CallStaticObjectMethod(env, jfields.media_codec_list_class,
                                               jfields.get_codec_info_at, i);
-
+        if (CHECK_EXCEPTION() || info == NULL)
+            goto error;
         name = (*env)->CallObjectMethod(env, info, jfields.get_name);
-        name_len = (*env)->GetStringUTFLength(env, name);
+        if (CHECK_EXCEPTION() || name == NULL)
+            goto error;
+        jsize name_len = (*env)->GetStringUTFLength(env, name);
+        if (CHECK_EXCEPTION())
+            goto error;
         name_ptr = (*env)->GetStringUTFChars(env, name, NULL);
-
-        if (OMXCodec_IsBlacklisted(name_ptr, name_len))
+        if (CHECK_EXCEPTION() || name_ptr == NULL)
+        {
+            ret = VLC_ENOMEM;
+            goto loopclean;
+        }
+        if (strpbrk(name_ptr, "\t\n") != NULL ||
+            OMXCodec_IsBlacklisted(name_ptr, name_len) ||
+            mc_candidate_failed(ctx->failed, request->mime, name_ptr) ||
+            mc_candidate_score(ctx->rules, name_ptr) < 0)
             goto loopclean;
 
-        if ((*env)->CallBooleanMethod(env, info, jfields.is_encoder))
+        bool encoder = (*env)->CallBooleanMethod(env, info, jfields.is_encoder);
+        if (CHECK_EXCEPTION())
+            goto error;
+        if (encoder)
+            goto loopclean;
+
+        /* Check declared MIME support before querying capabilities: asking for
+         * an unsupported type normally throws IllegalArgumentException. */
+        types = (*env)->CallObjectMethod(env, info, jfields.get_supported_types);
+        if (CHECK_EXCEPTION() || types == NULL)
+            goto error;
+        int num_types = (*env)->GetArrayLength(env, types);
+        if (CHECK_EXCEPTION())
+            goto error;
+        bool supports_mime = false;
+        bool supports_required = request->required_mime == NULL;
+        for (int j = 0; j < num_types; j++)
+        {
+            jobject type = (*env)->GetObjectArrayElement(env, types, j);
+            if (CHECK_EXCEPTION() || type == NULL)
+            {
+                if (type != NULL)
+                    (*env)->DeleteLocalRef(env, type);
+                goto error;
+            }
+            int match = jstrcmp(env, type, request->mime);
+            bool exception = CHECK_EXCEPTION() || match == -2;
+            supports_mime |= match == 0;
+            if (!exception && request->required_mime != NULL)
+            {
+                match = jstrcmp(env, type, request->required_mime);
+                exception = CHECK_EXCEPTION() || match == -2;
+                supports_required |= match == 0;
+            }
+            (*env)->DeleteLocalRef(env, type);
+            if (exception)
+                goto error;
+        }
+        if (!supports_mime || !supports_required)
             goto loopclean;
 
         codec_capabilities = (*env)->CallObjectMethod(env, info,
-                                                      jfields.get_capabilities_for_type,
-                                                      jmime);
+                                  jfields.get_capabilities_for_type, jmime);
+        if (CHECK_EXCEPTION() || codec_capabilities == NULL)
+            goto error;
+        profile_levels = (*env)->GetObjectField(env, codec_capabilities,
+                                               jfields.profile_levels_field);
         if (CHECK_EXCEPTION())
+            goto error;
+        int profile_levels_len = profile_levels != NULL
+                               ? (*env)->GetArrayLength(env, profile_levels) : 0;
+        if (CHECK_EXCEPTION())
+            goto error;
+        if (jfields.is_feature_supported)
         {
-            msg_Warn(p_obj, "Exception occurred in MediaCodecInfo.getCapabilitiesForType");
-            goto loopclean;
-        }
-        else if (codec_capabilities)
-        {
-            profile_levels = (*env)->GetObjectField(env, codec_capabilities, jfields.profile_levels_field);
-            if (profile_levels)
-                profile_levels_len = (*env)->GetArrayLength(env, profile_levels);
-            if (jfields.is_feature_supported)
+            jstring jfeature = JNI_NEW_STRING("adaptive-playback");
+            if (jfeature == NULL)
             {
-                jstring jfeature = JNI_NEW_STRING("adaptive-playback");
-                b_adaptive =
-                    (*env)->CallBooleanMethod(env, codec_capabilities,
-                                              jfields.is_feature_supported,
-                                              jfeature);
-                CHECK_EXCEPTION();
-                (*env)->DeleteLocalRef(env, jfeature);
+                ret = VLC_ENOMEM;
+                goto loopclean;
             }
+            b_adaptive = (*env)->CallBooleanMethod(env, codec_capabilities,
+                                         jfields.is_feature_supported, jfeature);
+            bool exception = CHECK_EXCEPTION();
+            (*env)->DeleteLocalRef(env, jfeature);
+            if (exception)
+                goto error;
         }
-        msg_Dbg(p_obj, "Number of profile levels: %d", profile_levels_len);
-
-        types = (*env)->CallObjectMethod(env, info, jfields.get_supported_types);
-        num_types = (*env)->GetArrayLength(env, types);
-        found = false;
-
-        for (int j = 0; j < num_types && !found; j++)
+        bool ignore_profile = MediaCodec_MatchDecoderList(
+                       ctx->ignore_names, name_ptr, name_len, false);
+        found = request->profile <= 0 || ignore_profile;
+        /* This component does not expose profiles but supports high profile. */
+        if (!strncmp(name_ptr, "OMX.LUMEVideoDecoder", __MIN(20, name_len)))
+            found = true;
+        for (int j = 0; j < profile_levels_len && !found; j++)
         {
-            jobject type = (*env)->GetObjectArrayElement(env, types, j);
-            if (!jstrcmp(env, type, psz_mime))
+            jobject level = (*env)->GetObjectArrayElement(env, profile_levels, j);
+            if (CHECK_EXCEPTION() || level == NULL)
             {
-                char *ignore_names = var_InheritString(p_obj,
-                                                       "decoder-ignore-profile");
-                bool ignore_profile = MediaCodec_MatchDecoderList(
-                    ignore_names, name_ptr, name_len, false);
-                free(ignore_names);
-                /* The mime type is matching for this component. We
-                   now check if the capabilities of the codec is
-                   matching the video format. */
-                if (profile > 0 && !ignore_profile)
-                {
-                    /* This decoder doesn't expose its profiles and is high
-                     * profile capable */
-                    if (!strncmp(name_ptr, "OMX.LUMEVideoDecoder", __MIN(20, name_len)))
-                        found = true;
-
-                    for (int i = 0; i < profile_levels_len && !found; ++i)
-                    {
-                        jobject profile_level = (*env)->GetObjectArrayElement(env, profile_levels, i);
-
-                        int omx_profile = (*env)->GetIntField(env, profile_level, jfields.profile_field);
-                        (*env)->DeleteLocalRef(env, profile_level);
-
-                        int codec_profile =
-                            convert_omx_to_profile_idc(codec, omx_profile);
-                        if (codec_profile != profile)
-                            continue;
-                        /* Some encoders set the level too high, thus we ignore it for the moment.
-                           We could try to guess the actual profile based on the resolution. */
-                        found = true;
-                    }
-                }
-                else
-                    found = true;
+                if (level != NULL)
+                    (*env)->DeleteLocalRef(env, level);
+                goto error;
             }
-            (*env)->DeleteLocalRef(env, type);
+            int omx_profile = (*env)->GetIntField(env, level, jfields.profile_field);
+            bool exception = CHECK_EXCEPTION();
+            (*env)->DeleteLocalRef(env, level);
+            if (exception)
+                goto error;
+            found = convert_omx_to_profile_idc(ctx->codec, omx_profile)
+                    == request->profile;
         }
         if (found)
         {
-            msg_Dbg(p_obj, "using %.*s", name_len, name_ptr);
-            psz_name = malloc(name_len + 1);
-            if (psz_name)
+            /* Amazon MTK components report the Surface size, not video size.
+             * Disable adaptive mode so the bitstream parser supplies the size. */
+            bool ignore_size = false;
+            static const char mtk_dec[] = "OMX.MTK.VIDEO.DECODER.";
+            if (strncmp(name_ptr, mtk_dec, sizeof(mtk_dec) - 1) == 0)
             {
-                memcpy(psz_name, name_ptr, name_len);
-                psz_name[name_len] = '\0';
-
-                bool ignore_size = false;
-
-                /* The AVC/HEVC MediaCodec implementation on Amazon fire TV
-                 * seems to report the Output surface size instead of the Video
-                 * size. This bug is specific to Amazon devices since other MTK
-                 * implementations report the correct size. The manufacturer is
-                 * checked only if the codec matches the MTK one in order to
-                 * avoid extra manufacturer check for other every devices.
-                 * */
-                static const char mtk_dec[] = "OMX.MTK.VIDEO.DECODER.";
-                if (strncmp(psz_name, mtk_dec, sizeof(mtk_dec) - 1) == 0)
-                {
-                    char *manufacturer = GetManufacturer(env);
-                    if (manufacturer && strcmp(manufacturer, "Amazon") == 0)
-                        ignore_size = true;
-                    free(manufacturer);
-                }
-
-                if (ignore_size)
-                {
-                    *p_quirks |= MC_API_VIDEO_QUIRKS_IGNORE_SIZE;
-                    /* If the MediaCodec size is ignored, the adaptive mode
-                     * should be disabled in order to trigger the hxxx_helper
-                     * parsers that will parse the correct video size. Hence
-                     * the following 'else if' */
-                }
-                else if (b_adaptive)
-                    *p_quirks |= MC_API_VIDEO_QUIRKS_ADAPTIVE;
+                char *manufacturer = GetManufacturer(env);
+                if (manufacturer == NULL)
+                    goto error;
+                if (strcmp(manufacturer, "Amazon") == 0)
+                    ignore_size = true;
+                free(manufacturer);
             }
+            if (ignore_size)
+                quirks |= MC_API_VIDEO_QUIRKS_IGNORE_SIZE;
+            else if (b_adaptive)
+                quirks |= MC_API_VIDEO_QUIRKS_ADAPTIVE;
+            if (mc_candidates_offer(candidates, request, ctx->rules, ctx->failed,
+                                    name_ptr, false, quirks) != 0)
+                ret = VLC_ENOMEM;
+            else
+                msg_Dbg(p_obj, "MediaCodec candidate: %s score=%"PRId64" mime=%s profile=%d",
+                        name_ptr, (int64_t)mc_candidate_score(ctx->rules, name_ptr)
+                                  + request->bonus, request->mime, request->profile);
         }
+        goto loopclean;
+error:
+        msg_Warn(p_obj, "MediaCodec enumeration failed for %s", request->mime);
+        ret = VLC_EGENERIC;
 loopclean:
-        if (name)
-        {
+        if (name_ptr != NULL)
             (*env)->ReleaseStringUTFChars(env, name, name_ptr);
+        if (name)
             (*env)->DeleteLocalRef(env, name);
-        }
         if (profile_levels)
             (*env)->DeleteLocalRef(env, profile_levels);
         if (types)
@@ -417,10 +443,67 @@ loopclean:
             (*env)->DeleteLocalRef(env, codec_capabilities);
         if (info)
             (*env)->DeleteLocalRef(env, info);
-        if (found)
+        if (ret != VLC_SUCCESS || (found && !ctx->video))
             break;
     }
+done:
     (*env)->DeleteLocalRef(env, jmime);
+    return ret;
+}
 
-    return psz_name;
+int MediaCodec_SelectCandidate(vlc_object_t *p_obj, vlc_fourcc_t codec,
+                              const struct mc_candidate_request *requests,
+                              size_t count, bool video, bool allow_relax,
+                              struct mc_candidate *result)
+{
+    *result = (struct mc_candidate) { 0 };
+    JNIEnv *env = android_getEnv(p_obj, THREAD_NAME);
+    if (env == NULL || !InitJNIFields(p_obj, env))
+        return VLC_EGENERIC;
+
+    struct mc_score_rule *rules = NULL;
+    char *failed = NULL, *ignore_names = NULL;
+    int ret;
+    if (video)
+    {
+        char *scores = var_InheritString(p_obj, "decoder-score-list");
+        unsigned invalid;
+        int parsed = mc_score_rules_parse(scores, &rules, &invalid);
+        free(scores);
+        if (parsed != 0)
+        {
+            ret = VLC_ENOMEM;
+            goto done;
+        }
+        if (invalid != 0)
+            msg_Warn(p_obj, "Ignoring %u invalid decoder score rules", invalid);
+        if (var_Type(p_obj, "mediacodec-failed-candidates") != 0)
+        {
+            failed = var_GetString(p_obj, "mediacodec-failed-candidates");
+            if (failed == NULL)
+            {
+                ret = VLC_ENOMEM;
+                goto done;
+            }
+        }
+    }
+    ignore_names = var_InheritString(p_obj, "decoder-ignore-profile");
+    struct mc_enumeration ctx = {
+        p_obj, env, codec, video, rules, failed, ignore_names,
+    };
+    bool relaxed;
+    ret = mc_candidates_select(requests, count, video && allow_relax,
+                               EnumerateCandidates, &ctx, result, &relaxed);
+    if (relaxed)
+        msg_Warn(p_obj, "MediaCodec: no strict profile candidate, retried without profile filtering");
+    if (ret == 1)
+        ret = VLC_ENOENT;
+    else if (ret == VLC_SUCCESS)
+        msg_Dbg(p_obj, "MediaCodec selected %s score=%"PRId64" mime=%s",
+                result->name, result->score, result->mime);
+done:
+    mc_score_rules_clear(rules);
+    free(failed);
+    free(ignore_names);
+    return ret;
 }

@@ -41,6 +41,7 @@
 #include <vlc_bits.h>
 
 #include "mediacodec.h"
+#include "mediacodec_candidates.h"
 #include "../codec/hxxx_helper.h"
 #include <OMX_Core.h>
 #include <OMX_Component.h>
@@ -52,6 +53,8 @@
 #define DECODE_FLAG_DRAIN (0x02)
 
 #define MAX_PIC 64
+/* Observe failure/retirement even if the opposite codec queue stops moving. */
+#define DEQUEUE_TIMEOUT VLC_TICK_FROM_MS(100)
 
 /**
  * Callback called when a new block is processed from DecodeBlock.
@@ -102,6 +105,12 @@ typedef struct decoder_sys_t
 
     vlc_mutex_t     lock;
     vlc_thread_t    out_thread;
+    bool           out_thread_started;
+    bool           codec_stopped;
+    bool           retry;
+    bool           dolby;
+    /* Serialize renderer buffer release against retirement of the codec. */
+    vlc_mutex_t     release_lock;
     /* Cond used to signal the output thread */
     vlc_cond_t      cond;
     /* Cond used to signal the decoder thread */
@@ -155,12 +164,23 @@ typedef struct decoder_sys_t
     };
 } decoder_sys_t;
 
+/* This callback context lives as long as the reader, including queued images.
+ * It must not look up decoder->p_sys after a module reload. */
+struct mc_air_video_context
+{
+    android_video_context_t android;
+    vlc_mutex_t lock;
+    decoder_t *decoder;
+    decoder_sys_t *sys;
+};
+
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
 static int  OpenDecoderNdk(vlc_object_t *);
 static void CleanDecoder(decoder_sys_t *);
 static void CloseDecoder(vlc_object_t *);
+static void RetireDecoder(decoder_sys_t *);
 
 static int Video_OnNewBlock(decoder_t *, block_t **);
 static int VideoHXXX_OnNewBlock(decoder_t *, block_t **);
@@ -217,6 +237,17 @@ vlc_module_begin ()
     add_string("decoder-ignore-profile", NULL,
                MEDIACODEC_IGNORE_PROFILE_TEXT,
                MEDIACODEC_IGNORE_PROFILE_LONGTEXT)
+    add_bool(CFG_PREFIX "retry", true, "Retry MediaCodec candidates",
+             "Try the next video decoder after startup or runtime failure.")
+    add_string("decoder-score-list", NULL, "MediaCodec candidate scores",
+               "Comma-separated POSIX extended regex=integer rules. First match "
+               "wins; default 100, negative scores disable a component. Dolby "
+               "candidates gain 500 when also supporting HEVC, otherwise 400. "
+               "Higher totals come first; ties keep enumeration order. "
+               "Scores do not override the component blacklist.")
+    add_bool(CFG_PREFIX "fake-dolby-fail", false,
+             "Simulate Dolby Vision decoder startup failure",
+             "For testing the fallback to a base HEVC decoder.")
     set_callbacks(OpenDecoderNdk, CloseDecoder)
     add_shortcut("mediacodec_ndk")
     add_submodule ()
@@ -317,6 +348,12 @@ static int HEVCSetCSD(decoder_t *p_dec, bool *p_size_changed)
     block_t *p_xps = hxxx_helper_get_extradata_block(hh);
     if (p_xps != NULL)
         CSDInit(p_sys, p_xps, 1);
+
+    if (p_dec->fmt_in->video.dovi.rpu_present && !p_sys->dolby)
+        hxxx_helper_get_colorimetry(hh, &p_dec->fmt_out.video.primaries,
+                                   &p_dec->fmt_out.video.transfer,
+                                   &p_dec->fmt_out.video.space,
+                                   &p_dec->fmt_out.video.color_range);
 
     HXXXInitSize(p_dec, p_size_changed);
     return VLC_SUCCESS;
@@ -614,9 +651,7 @@ static int StartMediaCodec(decoder_t *p_dec)
 
         args.video.p_surface = p_sys->video.p_surface;
 
-        if (p_dec->fmt_in->i_codec == VLC_CODEC_HEVC &&
-            p_dec->fmt_in->video.dovi.rpu_present &&
-            p_dec->fmt_in->video.dovi.bl_present)
+        if (p_sys->dolby)
         {
             /* The vendor decoder determines final colorspace from the RPU. */
             args.video.color.range = MC_COLOR_RANGE_UNSPECIFIED;
@@ -648,10 +683,15 @@ static int StartMediaCodec(decoder_t *p_dec)
         args.audio.i_channel_count  = p_sys->audio.i_channels;
     }
 
-    if (p_sys->api.configure_decoder(&p_sys->api, &args) != 0)
+    if (p_sys->dolby && var_InheritBool(p_dec, CFG_PREFIX "fake-dolby-fail"))
     {
+        msg_Warn(p_dec, "MediaCodec: simulating Dolby startup failure for %s",
+                 p_sys->api.psz_name);
         return MC_API_ERROR;
     }
+    int ret = p_sys->api.configure_decoder(&p_sys->api, &args);
+    if (ret != 0)
+        return ret;
 
     return p_sys->api.start(&p_sys->api);
 }
@@ -661,28 +701,30 @@ static int StartMediaCodec(decoder_t *p_dec)
  *****************************************************************************/
 static void StopMediaCodec(decoder_sys_t *p_sys)
 {
+    if (p_sys->codec_stopped)
+        return;
     /* Remove all pictures that are currently in flight in order
      * to prevent the vout from using destroyed output buffers. */
     if (p_sys->cat == VIDEO_ES)
         ReleaseAllPictureContexts(p_sys);
 
+    vlc_mutex_lock(&p_sys->release_lock);
     p_sys->api.stop(&p_sys->api);
+    vlc_mutex_unlock(&p_sys->release_lock);
 }
 
 static bool AndroidPictureContextRelease(struct asurface_picture_ctx *apctx,
                                          bool render)
 {
+    android_video_context_t *avctx =
+        vlc_video_context_GetPrivate(apctx->s.vctx, VLC_VIDEO_CONTEXT_AWINDOW);
+    decoder_sys_t *p_sys = avctx->dec_opaque;
+    vlc_mutex_lock(&p_sys->release_lock);
     int index = atomic_exchange(&apctx->index, -1);
     if (index >= 0)
-    {
-        android_video_context_t *avctx =
-            vlc_video_context_GetPrivate(apctx->s.vctx, VLC_VIDEO_CONTEXT_AWINDOW);
-        decoder_sys_t *p_sys = avctx->dec_opaque;
-
         p_sys->api.release_out(&p_sys->api, index, render);
-        return true;
-    }
-    return false;
+    vlc_mutex_unlock(&p_sys->release_lock);
+    return index >= 0;
 }
 
 static bool PictureContextRenderPic(struct picture_context_t *ctx)
@@ -698,18 +740,15 @@ static bool PictureContextRenderPicTs(struct picture_context_t *ctx,
 {
     struct asurface_picture_ctx *apctx =
         container_of(ctx, struct asurface_picture_ctx, s);
-
+    android_video_context_t *avctx =
+        vlc_video_context_GetPrivate(ctx->vctx, VLC_VIDEO_CONTEXT_AWINDOW);
+    decoder_sys_t *p_sys = avctx->dec_opaque;
+    vlc_mutex_lock(&p_sys->release_lock);
     int index = atomic_exchange(&apctx->index, -1);
     if (index >= 0)
-    {
-        android_video_context_t *avctx =
-            vlc_video_context_GetPrivate(ctx->vctx, VLC_VIDEO_CONTEXT_AWINDOW);
-        decoder_sys_t *p_sys = avctx->dec_opaque;
-
         p_sys->api.release_out_ts(&p_sys->api, index, ts * INT64_C(1000));
-        return true;
-    }
-    return false;
+    vlc_mutex_unlock(&p_sys->release_lock);
+    return index >= 0;
 }
 
 static struct vlc_asurfacetexture *
@@ -746,17 +785,12 @@ static void CleanFromLegacyVideoContext(void *priv)
 {
     android_video_context_t *avctx = priv;
     decoder_sys_t *p_sys = avctx->dec_opaque;
+    if (p_sys == NULL)
+        return;
 
     assert(!p_sys->video.use_air);
 
-    vlc_mutex_lock(&p_sys->lock);
-    /* Unblock output thread waiting in dequeue_out */
-    DecodeFlushLocked(p_sys);
-    /* Cancel the output thread */
-    AbortDecoderLocked(p_sys);
-    vlc_mutex_unlock(&p_sys->lock);
-
-    vlc_join(p_sys->out_thread, NULL);
+    RetireDecoder(p_sys);
 
     CleanDecoder(p_sys);
 }
@@ -811,7 +845,11 @@ GetPictureContext(decoder_t *p_dec, unsigned index)
          * contexts than android MediaCodec buffers */
         if (!slept)
             msg_Warn(p_dec, "waiting for more picture contexts (unlikely)");
+        vlc_mutex_unlock(&p_sys->lock);
         vlc_tick_sleep(VOUT_OUTMEM_SLEEP);
+        vlc_mutex_lock(&p_sys->lock);
+        if (p_sys->b_aborted || p_sys->b_decoder_dead)
+            return NULL;
         slept = true;
     }
 }
@@ -930,8 +968,15 @@ error:
 static void
 AImageReader_OnImageAvailable(void *context, AImageReader *reader)
 {
-    decoder_t *p_dec = context;
-    decoder_sys_t *p_sys = p_dec->p_sys;
+    struct mc_air_video_context *callback = context;
+    vlc_mutex_lock(&callback->lock);
+    decoder_sys_t *p_sys = callback->sys;
+    if (p_sys == NULL)
+    {
+        vlc_mutex_unlock(&callback->lock);
+        return;
+    }
+    decoder_t *p_dec = callback->decoder;
     assert(p_sys->video.use_air);
     android_video_context_t *avctx =
         vlc_video_context_GetPrivate(p_sys->video.ctx, VLC_VIDEO_CONTEXT_AWINDOW);
@@ -947,17 +992,19 @@ AImageReader_OnImageAvailable(void *context, AImageReader *reader)
     {
         msg_Warn(p_dec, "AImageReader_acquireNextImageAsync failed: %d",
                     status);
+        vlc_mutex_unlock(&callback->lock);
         return;
     }
     vlc_mutex_lock(&p_sys->lock);
     assert(p_sys->video.air_waiting_count > 0);
     p_sys->video.air_waiting_count--;
     vlc_cond_broadcast(&p_sys->video.air_cond);
-    if (p_sys->b_flush_out)
+    if (p_sys->b_flush_out || p_sys->b_aborted || p_sys->b_decoder_dead)
         avctx->air_api->AImage.deleteAsync(image, fence_fd);
     else
         QueueAImagePicture(p_dec, avctx, image, fence_fd);
     vlc_mutex_unlock(&p_sys->lock);
+    vlc_mutex_unlock(&callback->lock);
 }
 
 static int
@@ -999,20 +1046,13 @@ CreateSurfaceFromAImageReader(decoder_t *p_dec, vlc_decoder_device *dec_dev,
         return VLC_EGENERIC;
     }
 
-    struct AImageReader_ImageListener listener = {
-        .context = p_dec,
-        .onImageAvailable = AImageReader_OnImageAvailable,
-    };
-
-    air_api->AImageReader.setImageListener(reader, &listener);
-
     static const struct vlc_video_context_operations ops =
     {
         .destroy = CleanFromVideoContext,
     };
     p_sys->video.ctx =
         vlc_video_context_Create(dec_dev, VLC_VIDEO_CONTEXT_AWINDOW,
-                                 sizeof(android_video_context_t), &ops);
+                                 sizeof(struct mc_air_video_context), &ops);
 
     if (!p_sys->video.ctx)
     {
@@ -1033,6 +1073,15 @@ CreateSurfaceFromAImageReader(decoder_t *p_dec, vlc_decoder_device *dec_dev,
     p_sys->video.p_surface = window;
     p_sys->video.use_air = true;
     p_sys->video.air_waiting_count = 0;
+    struct mc_air_video_context *callback = (void *)avctx;
+    vlc_mutex_init(&callback->lock);
+    callback->decoder = p_dec;
+    callback->sys = p_sys;
+    struct AImageReader_ImageListener listener = {
+        .context = callback,
+        .onImageAvailable = AImageReader_OnImageAvailable,
+    };
+    air_api->AImageReader.setImageListener(reader, &listener);
     assert(window != NULL);
     return VLC_SUCCESS;
 }
@@ -1101,6 +1150,7 @@ end:
     return VLC_SUCCESS;
 
 error:
+    avctx->dec_opaque = NULL;
     vlc_video_context_Release(p_sys->video.ctx);
     p_sys->video.ctx = NULL;
     return VLC_EGENERIC;
@@ -1162,10 +1212,41 @@ static void CleanInputVideo(decoder_t *p_dec)
     }
 }
 
+static bool RememberFailedCandidate(decoder_t *p_dec)
+{
+    decoder_sys_t *p_sys = p_dec->p_sys;
+    const char *var = "mediacodec-failed-candidates";
+    if (var_Type(p_dec, var) == 0 &&
+        var_Create(p_dec, var, VLC_VAR_STRING) != VLC_SUCCESS)
+        return false;
+    char *old = var_GetString(p_dec, var);
+    if (old == NULL)
+        return false;
+    if (mc_candidate_failed(old, p_sys->api.psz_mime, p_sys->api.psz_name))
+    {
+        free(old);
+        return false;
+    }
+    char *failed = mc_candidate_fail(old, p_sys->api.psz_mime,
+                                    p_sys->api.psz_name);
+    free(old);
+    if (failed == NULL)
+        return false;
+    int ret = var_SetString(p_dec, var, failed);
+    /* The variable string duplication can itself run out of memory. Do not
+     * retry unless the exclusion was actually saved. */
+    char *saved = ret == VLC_SUCCESS ? var_GetString(p_dec, var) : NULL;
+    bool stored = saved != NULL && strcmp(saved, failed) == 0;
+    free(saved);
+    free(failed);
+    return stored;
+}
+
 /*****************************************************************************
  * OpenDecoder: Create the decoder instance
  *****************************************************************************/
-static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+static int OpenDecoderAttempt(vlc_object_t *p_this,
+                              pf_MediaCodecApi_init pf_init, bool *retry)
 {
     decoder_t *p_dec = (decoder_t *)p_this;
 
@@ -1279,41 +1360,50 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     p_sys->video.i_mpeg_dar_den = 0;
     p_sys->video.surfacetexture = NULL;
     p_sys->b_decoder_dead = false;
+    p_sys->retry = p_dec->fmt_in->i_cat == VIDEO_ES &&
+                   var_InheritBool(p_dec, CFG_PREFIX "retry");
 
     if (pf_init(&p_sys->api) != 0)
     {
         free(p_sys);
         return VLC_EGENERIC;
     }
-    /* The HEVC base layer profile is not an Android Dolby Vision profile. */
-    if (p_sys->api.prepare(&p_sys->api, b_dolby_vision ? -1 : i_profile) != 0)
+    /* The HEVC base layer profile is not an Android Dolby Vision profile.
+     * Keep both MIME modes in the pool when retrying Dolby components. */
+    struct mc_candidate_request requests[3];
+    size_t request_count = mc_candidate_requests(requests, mime,
+                            b_dolby_vision ? -1 : i_profile,
+                            b_dolby_vision && p_sys->retry ? "video/hevc" : NULL,
+                            i_profile);
+    bool vc1_fallback = !strcmp(mime, "video/wvc1") &&
+                       p_dec->fmt_in->i_codec == VLC_CODEC_VC1;
+    i_ret = p_sys->api.prepare(&p_sys->api, requests, request_count, !vc1_fallback);
+    if (i_ret == VLC_ENOENT && vc1_fallback)
     {
-        /* If the device can't handle video/wvc1,
-         * it can probably handle video/x-ms-wmv */
-        if (!strcmp(mime, "video/wvc1") && p_dec->fmt_in->i_codec == VLC_CODEC_VC1)
-        {
-            p_sys->api.psz_mime = "video/x-ms-wmv";
-            if (p_sys->api.prepare(&p_sys->api, i_profile) != 0)
-            {
-                p_sys->api.clean(&p_sys->api);
-                free(p_sys);
-                return (VLC_EGENERIC);
-            }
-        }
-        else
-        {
-            p_sys->api.clean(&p_sys->api);
-            free(p_sys);
-            return VLC_EGENERIC;
-        }
+        requests[0].mime = "video/x-ms-wmv";
+        i_ret = p_sys->api.prepare(&p_sys->api, requests, request_count, true);
     }
+    if (i_ret != VLC_SUCCESS)
+    {
+        if (i_ret == VLC_ENOENT && p_sys->retry)
+        {
+            msg_Warn(p_dec, "MediaCodec: candidates exhausted, trying other modules");
+            var_Create(p_dec, "mediacodec-failed", VLC_VAR_VOID);
+        }
+        p_sys->api.clean(&p_sys->api);
+        free(p_sys);
+        return i_ret;
+    }
+    p_sys->dolby = !strcmp(p_sys->api.psz_mime, "video/dolby-vision");
 
     p_dec->p_sys = p_sys;
 
     vlc_mutex_init(&p_sys->lock);
+    vlc_mutex_init(&p_sys->release_lock);
     vlc_cond_init(&p_sys->cond);
     vlc_cond_init(&p_sys->dec_cond);
 
+    p_sys->cat = p_dec->fmt_in->i_cat;
     if (p_dec->fmt_in->i_cat == VIDEO_ES)
     {
         vlc_cond_init(&p_sys->video.air_cond);
@@ -1331,6 +1421,9 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
         p_sys->pf_on_new_block = Video_OnNewBlock;
         p_sys->pf_on_flush = Video_OnFlush;
         p_sys->pf_process_output = Video_ProcessOutput;
+        p_dec->fmt_out.video = p_dec->fmt_in->video;
+        if (b_dolby_vision && !p_sys->dolby)
+            memset(&p_dec->fmt_out.video.dovi, 0, sizeof(p_dec->fmt_out.video.dovi));
 
         p_sys->video.timestamp_fifo = timestamp_FifoNew(32);
         if (!p_sys->video.timestamp_fifo)
@@ -1342,7 +1435,6 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
              * the surface attached to it */
             p_dec->fmt_out.i_codec = VLC_CODEC_ANDROID_OPAQUE;
 
-            p_dec->fmt_out.video = p_dec->fmt_in->video;
             if (p_dec->fmt_out.video.i_sar_num * p_dec->fmt_out.video.i_sar_den == 0)
             {
                 p_dec->fmt_out.video.i_sar_num = 1;
@@ -1432,16 +1524,21 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     i_ret = StartMediaCodec(p_dec);
     if (i_ret != VLC_SUCCESS)
     {
-        msg_Err(p_dec, "StartMediaCodec failed");
+        msg_Warn(p_dec, "MediaCodec: startup failed for %s (%s)",
+                 p_sys->api.psz_name, p_sys->api.psz_mime);
+        *retry = p_sys->retry && i_ret != VLC_ENOMEM &&
+                 RememberFailedCandidate(p_dec);
         goto bailout;
     }
 
     if (vlc_clone(&p_sys->out_thread, OutThread, p_dec))
     {
         msg_Err(p_dec, "vlc_clone failed");
-        vlc_mutex_unlock(&p_sys->lock);
         goto bailout;
     }
+    p_sys->out_thread_started = true;
+    msg_Dbg(p_dec, "MediaCodec: started %s (%s)",
+            p_sys->api.psz_name, p_sys->api.psz_mime);
 
     p_dec->pf_decode = DecodeBlock;
     p_dec->pf_flush  = DecodeFlush;
@@ -1449,9 +1546,21 @@ static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
     return VLC_SUCCESS;
 
 bailout:
-    CleanInputVideo(p_dec);
-    CleanDecoder(p_sys);
+    CloseDecoder(p_this);
+    p_dec->p_sys = NULL;
     return VLC_EGENERIC;
+}
+
+static int OpenDecoder(vlc_object_t *p_this, pf_MediaCodecApi_init pf_init)
+{
+    bool retry;
+    int ret;
+    do
+    {
+        retry = false;
+        ret = OpenDecoderAttempt(p_this, pf_init, &retry);
+    } while (retry);
+    return ret;
 }
 
 static int OpenDecoderNdk(vlc_object_t *p_this)
@@ -1496,6 +1605,39 @@ static void CleanDecoder(decoder_sys_t *p_sys)
 /*****************************************************************************
  * CloseDecoder: Close the decoder instance
  *****************************************************************************/
+/* Stop the producer before another candidate can bind the same Surface.
+ * A legacy picture may still hold p_sys through its video context afterwards. */
+static void RetireDecoder(decoder_sys_t *p_sys)
+{
+    if (p_sys->codec_stopped)
+        return;
+
+    if (p_sys->cat == VIDEO_ES && p_sys->video.ctx && p_sys->video.use_air)
+    {
+        struct mc_air_video_context *callback =
+            vlc_video_context_GetPrivate(p_sys->video.ctx, VLC_VIDEO_CONTEXT_AWINDOW);
+        vlc_mutex_lock(&callback->lock);
+        callback->sys = NULL;
+        callback->decoder = NULL;
+        vlc_mutex_unlock(&callback->lock);
+        callback->android.air_api->AImageReader.setImageListener(
+                                            callback->android.air, NULL);
+    }
+
+    vlc_mutex_lock(&p_sys->lock);
+    p_sys->b_decoder_dead = true;
+    AbortDecoderLocked(p_sys);
+    vlc_mutex_unlock(&p_sys->lock);
+
+    if (p_sys->out_thread_started)
+    {
+        vlc_join(p_sys->out_thread, NULL);
+        p_sys->out_thread_started = false;
+    }
+    StopMediaCodec(p_sys);
+    p_sys->codec_stopped = true;
+}
+
 static void CloseDecoder(vlc_object_t *p_this)
 {
     decoder_t *p_dec = (decoder_t *)p_this;
@@ -1503,36 +1645,27 @@ static void CloseDecoder(vlc_object_t *p_this)
 
     vlc_mutex_lock(&p_sys->lock);
     p_sys->b_decoder_dead = true;
+    bool failed = p_sys->b_aborted;
     vlc_mutex_unlock(&p_sys->lock);
+    CleanInputVideo(p_dec);
 
-    if (p_sys->cat == VIDEO_ES && p_sys->video.ctx)
+    if (p_sys->cat == VIDEO_ES && p_sys->video.ctx && !p_sys->video.use_air)
     {
-        if (!p_sys->video.use_air)
-        {
-            vlc_video_context_Release(p_sys->video.ctx);
-            /* If we have a video context, we're using Surface with inflight
-            * pictures, which might already have been queued, and flushing
-            * them would make them invalid, breaking mechanism like waiting
-            * on OnFrameAvailableListener.*/
-            CleanInputVideo(p_dec);
-            return;
-        }
-        android_video_context_t *avctx =
-            vlc_video_context_GetPrivate(p_sys->video.ctx, VLC_VIDEO_CONTEXT_AWINDOW);
-        avctx->air_api->AImageReader.setImageListener(avctx->air, NULL);
+        /* Normal close retains the codec until queued pictures are rendered.
+         * Failure/startup cleanup must release it before opening a replacement,
+         * but the picture contexts themselves remain alive until vout is done. */
+        if (!p_sys->out_thread_started || failed)
+            RetireDecoder(p_sys);
         vlc_video_context_Release(p_sys->video.ctx);
+        return;
     }
 
-    vlc_mutex_lock(&p_sys->lock);
-    /* Unblock output thread waiting in dequeue_out */
-    DecodeFlushLocked(p_sys);
-    /* Cancel the output thread */
-    AbortDecoderLocked(p_sys);
-    vlc_mutex_unlock(&p_sys->lock);
-
-    vlc_join(p_sys->out_thread, NULL);
-
-    CleanInputVideo(p_dec);
+    RetireDecoder(p_sys);
+    if (p_sys->cat == VIDEO_ES && p_sys->video.ctx)
+    {
+        vlc_video_context_Release(p_sys->video.ctx);
+        p_sys->video.ctx = NULL;
+    }
     CleanDecoder(p_sys);
 }
 
@@ -1599,7 +1732,12 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
 
                 struct asurface_picture_ctx *apctx =
                     GetPictureContext(p_dec,p_out->buf.i_index);
-                assert(apctx);
+                if (apctx == NULL)
+                {
+                    picture_Release(p_pic);
+                    return p_sys->api.release_out(&p_sys->api,
+                                                 p_out->buf.i_index, false);
+                }
                 assert(apctx->s.vctx);
                 vlc_video_context_Hold(apctx->s.vctx);
                 p_pic->context = &apctx->s;
@@ -1654,22 +1792,22 @@ static int Video_ProcessOutput(decoder_t *p_dec, mc_api_out *p_out,
                 p_out->conf.video.crop_right, p_out->conf.video.crop_bottom);
 
         /* Only use MediaCodec output as fallback when container/input is unspecified */
-        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+        if (!p_sys->dolby &&
             p_dec->fmt_out.video.primaries == COLOR_PRIMARIES_UNDEF)
             p_dec->fmt_out.video.primaries =
                 mc_to_vlc_primaries(p_out->conf.video.color.standard);
 
-        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+        if (!p_sys->dolby &&
             p_dec->fmt_out.video.space == COLOR_SPACE_UNDEF)
             p_dec->fmt_out.video.space =
                  mc_to_vlc_color_space(p_out->conf.video.color.standard);
 
-        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+        if (!p_sys->dolby &&
             p_dec->fmt_out.video.transfer == TRANSFER_FUNC_UNDEF)
             p_dec->fmt_out.video.transfer =
                 mc_to_vlc_color_transfer(p_out->conf.video.color.transfer);
 
-        if (!p_dec->fmt_in->video.dovi.rpu_present &&
+        if (!p_sys->dolby &&
             p_dec->fmt_out.video.color_range == COLOR_RANGE_UNDEF)
             p_dec->fmt_out.video.color_range =
                 mc_to_vlc_color_range(p_out->conf.video.color.range);
@@ -1948,13 +2086,20 @@ static void *OutThread(void *data)
 
         /* Wait for an output buffer. This function returns when a new output
          * is available or if output is flushed. */
-        i_index = p_sys->api.dequeue_out(&p_sys->api, -1);
+        i_index = p_sys->api.dequeue_out(&p_sys->api, DEQUEUE_TIMEOUT);
 
         vlc_mutex_lock(&p_sys->lock);
 
+        if (p_sys->b_decoder_dead || p_sys->b_aborted)
+        {
+            if (i_index >= 0)
+                p_sys->api.release_out(&p_sys->api, i_index, false);
+            break;
+        }
+
         /* Ignore dequeue_out errors caused by flush, or late picture being
          * dequeued after close. */
-        if (p_sys->b_flush_out || p_sys->b_decoder_dead)
+        if (p_sys->b_flush_out)
         {
             /* If i_index >= 0, Release it. There is no way to know if i_index
              * is owned by us, so don't check the error. */
@@ -2015,7 +2160,7 @@ static void *OutThread(void *data)
         msg_Warn(p_dec, "OutThread stopped");
 
     /* Signal DecoderFlush that the output thread aborted */
-    p_sys->b_aborted = true;
+    AbortDecoderLocked(p_sys);
     vlc_cond_signal(&p_sys->dec_cond);
     vlc_mutex_unlock(&p_sys->lock);
 
@@ -2046,7 +2191,7 @@ static int QueueBlockLocked(decoder_t *p_dec, block_t *p_in_block,
     while (b_drain || (p_block = GetNextBlock(p_sys, p_in_block)))
     {
         vlc_mutex_unlock(&p_sys->lock);
-        int i_index = p_sys->api.dequeue_in(&p_sys->api, -1);
+        int i_index = p_sys->api.dequeue_in(&p_sys->api, DEQUEUE_TIMEOUT);
         vlc_mutex_lock(&p_sys->lock);
 
         if (p_sys->b_aborted)
@@ -2140,10 +2285,9 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
 
     if (p_sys->b_aborted)
     {
-        if (p_sys->b_has_format)
-            goto end;
-        else
+        if (p_sys->retry || !p_sys->b_has_format)
             goto reload;
+        goto end;
     }
 
     if (p_in_block == NULL)
@@ -2183,6 +2327,8 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
     {
         if (i_ret != 0)
         {
+            /* Invalid bitstream/allocation errors are not codec failures. */
+            p_sys->retry = false;
             AbortDecoderLocked(p_sys);
             msg_Err(p_dec, "pf_on_new_block failed");
         }
@@ -2213,6 +2359,8 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_in_block)
                 break;
             default:
                 msg_Err(p_dec, "StartMediaCodec failed");
+                if (i_ret == VLC_ENOMEM)
+                    p_sys->retry = false;
                 AbortDecoderLocked(p_sys);
                 goto end;
             }
@@ -2228,16 +2376,18 @@ end:
         block_Release(p_in_block);
     /* Too late to reload here, we already modified/released the input block,
      * do it next time. */
-    int ret = p_sys->b_aborted && p_sys->b_has_format ? VLCDEC_ECRITICAL
-                                                      : VLCDEC_SUCCESS;
+    int ret = p_sys->b_aborted && p_sys->b_has_format && !p_sys->retry
+            ? VLCDEC_ECRITICAL : VLCDEC_SUCCESS;
     vlc_mutex_unlock(&p_sys->lock);
     return ret;
 
 reload:
+    AbortDecoderLocked(p_sys);
     vlc_mutex_unlock(&p_sys->lock);
-    /* Add an empty variable so that mediacodec won't be loaded again
-     * for this ES */
-    var_Create(p_dec, "mediacodec-failed", VLC_VAR_VOID);
+    msg_Warn(p_dec, "MediaCodec: runtime failure for %s (%s)",
+             p_sys->api.psz_name, p_sys->api.psz_mime);
+    if (!p_sys->retry || !RememberFailedCandidate(p_dec))
+        var_Create(p_dec, "mediacodec-failed", VLC_VAR_VOID);
     return VLCDEC_RELOAD;
 }
 

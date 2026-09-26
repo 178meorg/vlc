@@ -74,6 +74,7 @@ man1_MANS = \
 	   vlc-wrapper.1
 
 EXTRA_DIST = \
+	mediacodec-retry.md \
 	$(CHANGELOGS) \
 	$(man1_MANS) \
 	$(LIBVLC_SAMPLES) \

@@ -31,6 +31,11 @@ typedef struct mc_api_out mc_api_out;
 typedef int (*pf_MediaCodecApi_init)(mc_api*);
 
 int MediaCodecNdk_Init(mc_api*);
+struct mc_candidate;
+struct mc_candidate_request;
+int MediaCodec_SelectCandidate(vlc_object_t *, vlc_fourcc_t,
+                              const struct mc_candidate_request *, size_t,
+                              bool, bool, struct mc_candidate *);
 
 #define MC_API_ERROR (-1)
 #define MC_API_INFO_TRYAGAIN (-11)
@@ -170,7 +175,8 @@ struct mc_api
     bool b_direct_rendering;
 
     void (*clean)(mc_api *);
-    int (*prepare)(mc_api *, int i_profile);
+    int (*prepare)(mc_api *, const struct mc_candidate_request *, size_t,
+                   bool allow_relax);
     int (*configure_decoder)(mc_api *, union mc_api_args* p_args);
     int (*start)(mc_api *);
     int (*stop)(mc_api *);

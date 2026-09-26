@@ -96,6 +96,10 @@ check_PROGRAMS = \
 
 check_PROGRAMS += $(player_programs)
 
+if !HAVE_WIN32
+check_PROGRAMS += test_modules_codec_mediacodec_candidates
+endif
+
 if HAVE_GL
 check_PROGRAMS += \
 	test_modules_video_output_opengl_filters \
@@ -353,6 +357,7 @@ test_modules_packetizer_mpegvideo_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_keystore_SOURCES = modules/keystore/test.c
 test_modules_codec_mediacodec_profile_SOURCES = modules/codec/mediacodec_profile.c
 test_modules_codec_mediacodec_profile_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/../include
+test_modules_codec_mediacodec_candidates_SOURCES = modules/codec/mediacodec_candidates.c
 test_modules_demux_mkv_dolby_vision_SOURCES = modules/demux/mkv_dolby_vision.cpp
 test_modules_keystore_LDADD = $(LIBVLCCORE) $(LIBVLC)
 test_modules_tls_SOURCES = modules/misc/tls.c

@@ -38,6 +38,7 @@
 #include "omxil_utils.h"
 
 #include "mediacodec.h"
+#include "mediacodec_candidates.h"
 
 static_assert(MC_API_NO_QUIRKS == OMXCODEC_NO_QUIRKS
     && MC_API_QUIRKS_NEED_CSD == OMXCODEC_QUIRKS_NEED_CSD
@@ -45,9 +46,6 @@ static_assert(MC_API_NO_QUIRKS == OMXCODEC_NO_QUIRKS
     && MC_API_VIDEO_QUIRKS_SUPPORT_INTERLACED == OMXCODEC_VIDEO_QUIRKS_SUPPORT_INTERLACED
     && MC_API_AUDIO_QUIRKS_NEED_CHANNELS == OMXCODEC_AUDIO_QUIRKS_NEED_CHANNELS,
     "mediacodec.h/omx_utils.h mismatch");
-
-char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
-                         const char *psz_mime, int profile, int *p_quirks);
 
 #define THREAD_NAME "mediacodec_ndk"
 
@@ -143,7 +141,7 @@ static int ConfigureDecoder(mc_api *api, union mc_api_args *p_args)
     if (!p_sys->p_format)
     {
         msg_Err(api->p_obj, "AMediaFormat.new failed");
-        return MC_API_ERROR;
+        return VLC_ENOMEM;
     }
 
     if (p_args->video.b_low_latency)
@@ -479,15 +477,22 @@ static void Clean(mc_api *api)
 /*****************************************************************************
  * Prepare
  *****************************************************************************/
-static int Prepare(mc_api * api, int i_profile)
+static int Prepare(mc_api *api, const struct mc_candidate_request *requests,
+                   size_t count, bool allow_relax)
 {
     free(api->psz_name);
+    api->psz_name = NULL;
 
     api->i_quirks = 0;
-    api->psz_name = MediaCodec_GetName(api->p_obj, api->i_codec, api->psz_mime,
-                                       i_profile, &api->i_quirks);
-    if (!api->psz_name)
-        return MC_API_ERROR;
+    struct mc_candidate selected;
+    int ret = MediaCodec_SelectCandidate(api->p_obj, api->i_codec, requests,
+                                         count, api->i_cat == VIDEO_ES,
+                                         allow_relax, &selected);
+    if (ret != VLC_SUCCESS)
+        return ret;
+    api->psz_name = selected.name;
+    api->psz_mime = selected.mime;
+    api->i_quirks = selected.quirks;
     api->i_quirks |= OMXCodec_GetQuirks(api->i_cat, api->i_codec, api->psz_name,
                                         strlen(api->psz_name));
     /* Allow interlaced picture after API 21 */
